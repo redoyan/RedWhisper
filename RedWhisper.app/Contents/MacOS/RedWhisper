@@ -1,0 +1,30 @@
+#!/bin/bash
+set -u
+
+RUNTIME_DIR="$(cd "$(dirname "$0")/../Resources/runtime" 2>/dev/null && pwd)"
+PYTHON="$RUNTIME_DIR/.venv/bin/python3"
+SCRIPT="$RUNTIME_DIR/voxtape.py"
+LOG_DIR="$HOME/Library/Logs/RedWhisper"
+LOG_FILE="$LOG_DIR/app.log"
+
+mkdir -p "$LOG_DIR"
+
+if [[ ! -x "$PYTHON" || ! -f "$SCRIPT" ]]; then
+    /usr/bin/osascript -e 'display alert "RedWhisper runtime is missing" message "Run build_app.sh from the MLX-Whisper folder, then launch RedWhisper.app again."'
+    exit 1
+fi
+
+cd "$RUNTIME_DIR"
+export PYTHONUNBUFFERED=1
+while true; do
+    "$PYTHON" "$SCRIPT" --no-launch-gui >>"$LOG_FILE" 2>&1 &
+    CHILD_PID=$!
+    trap 'kill "$CHILD_PID" 2>/dev/null || true' TERM INT HUP EXIT
+    wait "$CHILD_PID"
+    STATUS=$?
+    trap - EXIT
+    if [[ "$STATUS" -eq 75 ]]; then
+        continue
+    fi
+    exit "$STATUS"
+done

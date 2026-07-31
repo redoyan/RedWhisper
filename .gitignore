@@ -1,0 +1,43 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+*.command
+
+# Generated launch script
+start.sh
+RedWhisper.app/Contents/Resources/runtime/
+
+# Local secrets and machine-specific settings
+.env
+.env.*
+!.env.example
+settings.json
+replacements.json
+note.md
+*.log
+credentials.json
+secrets.json
+*.secrets.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Audio
+*.wav
+*.mp3
+*.m4a
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,2 @@
+# Optional: install only when local LLM post-processing is wanted.
+mlx-lm>=0.31.0
