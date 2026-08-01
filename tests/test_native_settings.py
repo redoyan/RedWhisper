@@ -4,7 +4,7 @@ from unittest.mock import patch
 import AppKit
 
 from audio_devices import InputDevice
-from native_settings import NativeSettingsController
+from native_settings import NativeSettingsController, TRANSCRIPTION_MODEL_VALUES
 from settings_store import AppSettings
 
 
@@ -51,7 +51,11 @@ class NativeSettingsTests(unittest.TestCase):
         saved = []
         controller = NativeSettingsController.alloc().init()
         controller.configure(AppSettings(), [], saved.append)
-        controller.transcription_model_popup.selectItemAtIndex_(2)
+        controller.transcription_model_popup.selectItemAtIndex_(
+            TRANSCRIPTION_MODEL_VALUES.index(
+                ("openai", "gpt-4o-mini-transcribe")
+            )
+        )
 
         with patch(
             "native_settings.openai_key_from_environment",
@@ -126,7 +130,12 @@ class NativeSettingsTests(unittest.TestCase):
             "Scribe v2 Realtime — ElevenLabs streaming",
             model_labels,
         )
-        controller.transcription_model_popup.selectItemAtIndex_(3)
+        self.assertIn("Scribe v1 — ElevenLabs legacy", model_labels)
+        self.assertIn("GPT Transcribe — OpenAI recommended", model_labels)
+        self.assertNotIn("Eleven v3", model_labels)
+        controller.transcription_model_popup.selectItemAtIndex_(
+            TRANSCRIPTION_MODEL_VALUES.index(("elevenlabs", "scribe_v2"))
+        )
         controller.elevenlabs_key_field.setStringValue_("eleven-key")
 
         with patch(

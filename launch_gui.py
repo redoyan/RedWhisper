@@ -489,8 +489,11 @@ def _settings_page(
         for device in (input_devices or [])
     )
     openai_model_labels = {
+        "gpt-transcribe": "GPT Transcribe — recommended for recorded audio",
         "gpt-4o-transcribe": "GPT-4o Transcribe — highest accuracy",
         "gpt-4o-mini-transcribe": "GPT-4o Mini Transcribe — faster / lower cost",
+        "gpt-4o-transcribe-diarize": "GPT-4o Transcribe Diarize — speaker labels",
+        "whisper-1": "Whisper-1 — legacy / timestamps",
     }
     openai_model_options = "".join(
         f'<option value="{model}" {"selected" if current.openai_model == model else ""}>{escape(openai_model_labels[model])}</option>'
@@ -499,6 +502,7 @@ def _settings_page(
     elevenlabs_model_labels = {
         "scribe_v2": "Scribe v2 — recorded audio / maximum accuracy",
         "scribe_v2_realtime": "Scribe v2 Realtime — WebSocket streaming",
+        "scribe_v1": "Scribe v1 — legacy",
     }
     elevenlabs_model_options = "".join(
         f'<option value="{model}" {"selected" if current.elevenlabs_model == model else ""}>{escape(elevenlabs_model_labels[model])}</option>'
@@ -592,7 +596,7 @@ button {{ appearance:none; border:0; border-radius:12px; background:var(--accent
 <p>Runs privately on this Mac through Apple MLX.</p>
 <div class="facts"><span><b>Audio:</b> never leaves Mac</span><span><b>Memory:</b> about {LOCAL_MODEL_ESTIMATED_GB:.0f} GB peak for short dictation</span><span><b>Compute:</b> Apple GPU + unified memory</span></div></label>
 <label class="card"><input type="radio" name="engine" value="openai" {openai_checked}>
-<span class="badge cloud">Cloud</span><h2>GPT-4o Transcribe</h2>
+<span class="badge cloud">Cloud</span><h2>OpenAI Transcription</h2>
 <p>High-quality cloud transcription with low local inference load.</p>
 <div class="facts"><span><b>Audio:</b> sent to OpenAI</span><span><b>Memory:</b> minimal local use</span><span><b>Status:</b> {escape(openai_state)}</span></div></label>
 <label class="card"><input type="radio" name="engine" value="elevenlabs" {elevenlabs_checked}>
@@ -635,19 +639,23 @@ def _started_page(
     runtime: bool = False,
 ) -> str:
     openai_labels = {
+        "gpt-transcribe": "GPT Transcribe",
         "gpt-4o-transcribe": "GPT-4o Transcribe",
         "gpt-4o-mini-transcribe": "GPT-4o Mini Transcribe",
+        "gpt-4o-transcribe-diarize": "GPT-4o Transcribe Diarize",
+        "whisper-1": "Whisper-1",
+    }
+    elevenlabs_labels = {
+        "scribe_v2": "ElevenLabs Scribe v2",
+        "scribe_v2_realtime": "ElevenLabs Scribe v2 Realtime",
+        "scribe_v1": "ElevenLabs Scribe v1",
     }
     if engine == "local":
         label = "Whisper Large v3 Turbo"
     elif engine == "openai":
         label = openai_labels[openai_model]
     else:
-        label = (
-            "ElevenLabs Scribe v2 Realtime"
-            if elevenlabs_model == "scribe_v2_realtime"
-            else "ElevenLabs Scribe v2"
-        )
+        label = elevenlabs_labels[elevenlabs_model]
     heading = "Settings saved." if runtime else "RedWhisper is ready."
     detail = (
         "RedWhisper is restarting in the background. You can close this tab."

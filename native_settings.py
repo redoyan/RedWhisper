@@ -27,17 +27,25 @@ from settings_store import AppSettings
 
 TRANSCRIPTION_MODEL_VALUES = [
     ("local", None),
+    ("openai", "gpt-transcribe"),
     ("openai", "gpt-4o-transcribe"),
     ("openai", "gpt-4o-mini-transcribe"),
+    ("openai", "gpt-4o-transcribe-diarize"),
+    ("openai", "whisper-1"),
     ("elevenlabs", "scribe_v2"),
     ("elevenlabs", "scribe_v2_realtime"),
+    ("elevenlabs", "scribe_v1"),
 ]
 TRANSCRIPTION_MODEL_LABELS = [
     "Whisper Large v3 Turbo — Local",
+    "GPT Transcribe — OpenAI recommended",
     "GPT-4o Transcribe — OpenAI accuracy",
     "GPT-4o Mini Transcribe — OpenAI speed",
+    "GPT-4o Transcribe Diarize — OpenAI speakers",
+    "Whisper-1 — OpenAI legacy",
     "Scribe v2 — ElevenLabs",
     "Scribe v2 Realtime — ElevenLabs streaming",
+    "Scribe v1 — ElevenLabs legacy",
 ]
 REWRITE_ENGINE_VALUES = ["off", "local", "openai", "openrouter"]
 REWRITE_ENGINE_LABELS = [
