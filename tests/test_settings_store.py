@@ -52,6 +52,18 @@ class SettingsStoreTests(unittest.TestCase):
     def test_api_key_is_not_part_of_persisted_settings(self) -> None:
         self.assertNotIn("api_key", AppSettings.__dataclass_fields__)
 
+    def test_all_documented_cloud_transcription_models_are_valid(self) -> None:
+        for openai_model in (
+            "gpt-transcribe",
+            "gpt-4o-transcribe",
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-transcribe-diarize",
+            "whisper-1",
+        ):
+            AppSettings(openai_model=openai_model).validate()
+        for elevenlabs_model in ("scribe_v2", "scribe_v2_realtime", "scribe_v1"):
+            AppSettings(elevenlabs_model=elevenlabs_model).validate()
+
     def test_primary_and_secondary_shortcuts_must_differ(self) -> None:
         with self.assertRaises(ValueError):
             AppSettings(
