@@ -253,12 +253,12 @@ def quartz_all_modifier_mask() -> int:
     )
 
 
-WAVEFORM_BAR_RGBA = (0.56, 0.37, 0.22, 0.78)
+WAVEFORM_LINE_RGBA = (0.22, 0.17, 0.14, 0.72)
 RECORDING_GLASS_ALPHA = 0.72
 
 
 class WaveformView(AppKit.NSView):
-    """Draw a compact, live audio waveform without text glyphs."""
+    """Draw a compact, continuous line that responds to live audio levels."""
 
     def initWithFrame_(self, frame):
         self = AppKit.NSView.initWithFrame_(self, frame)
@@ -273,25 +273,40 @@ class WaveformView(AppKit.NSView):
     def drawRect_(self, _dirty_rect) -> None:
         bounds = self.bounds()
         count = len(self._levels)
-        gap = 6.0
-        bar_width = 2.5
-        waveform_width = count * bar_width + (count - 1) * gap
-        start_x = (bounds.size.width - waveform_width) / 2
-        max_height = max(3.0, bounds.size.height - 10.0)
-        AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
-            *WAVEFORM_BAR_RGBA
-        ).setFill()
+        if count < 2:
+            return
 
+        horizontal_padding = 8.0
+        step = (bounds.size.width - horizontal_padding * 2) / (count - 1)
+        center_y = bounds.size.height / 2
+        amplitude = max(1.0, center_y - 5.0)
+        points = []
         for index, level in enumerate(self._levels):
-            height = 3.0 + max_height * max(0.0, min(1.0, level))
-            x = start_x + index * (bar_width + gap)
-            y = (bounds.size.height - height) / 2
-            path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                AppKit.NSMakeRect(x, y, bar_width, height),
-                bar_width / 2,
-                bar_width / 2,
+            normalized = max(0.0, min(1.0, level))
+            direction = -1.0 if index % 2 else 1.0
+            points.append(
+                AppKit.NSMakePoint(
+                    horizontal_padding + index * step,
+                    center_y + direction * normalized * amplitude,
+                )
             )
-            path.fill()
+
+        AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
+            *WAVEFORM_LINE_RGBA
+        ).setStroke()
+        path = AppKit.NSBezierPath.bezierPath()
+        path.setLineWidth_(2.0)
+        path.setLineCapStyle_(AppKit.NSRoundLineCapStyle)
+        path.setLineJoinStyle_(AppKit.NSRoundLineJoinStyle)
+        path.moveToPoint_(points[0])
+        for previous, point in zip(points, points[1:]):
+            midpoint_x = (previous.x + point.x) / 2
+            path.curveToPoint_controlPoint1_controlPoint2_(
+                point,
+                AppKit.NSMakePoint(midpoint_x, previous.y),
+                AppKit.NSMakePoint(midpoint_x, point.y),
+            )
+        path.stroke()
 
 
 class RecordingIndicator:

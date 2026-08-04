@@ -2,7 +2,7 @@ import unittest
 
 from voxtape import (
     RECORDING_GLASS_ALPHA,
-    WAVEFORM_BAR_RGBA,
+    WAVEFORM_LINE_RGBA,
     recording_indicator_origin,
     recording_status_text,
 )
@@ -12,8 +12,8 @@ class RecordingIndicatorTests(unittest.TestCase):
     def test_glass_background_is_translucent(self) -> None:
         self.assertEqual(RECORDING_GLASS_ALPHA, 0.72)
 
-    def test_waveform_bars_are_bright_enough_to_remain_visible(self) -> None:
-        self.assertEqual(WAVEFORM_BAR_RGBA, (0.56, 0.37, 0.22, 0.78))
+    def test_waveform_line_uses_muted_brown_charcoal(self) -> None:
+        self.assertEqual(WAVEFORM_LINE_RGBA, (0.22, 0.17, 0.14, 0.72))
 
     def test_origin_is_bottom_center_of_visible_screen(self) -> None:
         self.assertEqual(
