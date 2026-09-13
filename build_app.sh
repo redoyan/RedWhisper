@@ -4,13 +4,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="$ROOT/RedWhisper.app"
 RUNTIME="$APP/Contents/Resources/runtime"
+LAUNCHER="$APP/Contents/MacOS/RedWhisperLauncher"
 
 if [[ ! -x "$ROOT/.venv/bin/python3" ]]; then
     echo "RedWhisper is not installed. Run ./install.sh first."
     exit 1
 fi
 
-mkdir -p "$RUNTIME"
+if ! command -v xcrun >/dev/null 2>&1 || ! xcrun --find clang >/dev/null 2>&1; then
+    echo "Apple Command Line Tools are required. Run: xcode-select --install"
+    exit 1
+fi
+
+mkdir -p "$RUNTIME" "$(dirname "$LAUNCHER")"
 
 # APFS clone copies keep the bundled environment isolated without initially
 # consuming another full copy of its 1.3 GB of package data.
@@ -38,6 +44,11 @@ done
 /bin/cp "$ROOT/assets/RedWhisper.icns" \
     "$APP/Contents/Resources/RedWhisper.icns"
 
-chmod +x "$APP/Contents/MacOS/RedWhisper"
+xcrun clang -fobjc-arc \
+    -framework Cocoa \
+    -framework AVFoundation \
+    -framework ApplicationServices \
+    "$ROOT/redwhisper_launcher.m" -o "$LAUNCHER"
+chmod +x "$LAUNCHER"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 echo "RedWhisper.app is ready."

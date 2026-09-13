@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
@@ -6,14 +9,95 @@ from audio_devices import InputDevice
 from hotkey_config import HotkeyConfig
 from settings_store import AppSettings
 from voxtape import (
+    AppKit,
     MLXWhisperApp,
     QuartzHotkeyListener,
+    _watch_launcher,
+    configure_bundle_activation_policy,
     quartz_single_modifier_mask,
     restructuring_label,
+    start_launcher_watchdog,
 )
 
 
 class MLXWhisperAppTests(unittest.TestCase):
+    def test_audio_shutdown_deadlock_exits_runtime(self) -> None:
+        # A real subprocess verifies the watchdog can end a blocked call,
+        # without opening a microphone or invoking a transcription provider.
+        for blocked_method, exit_code in (("stop", 75), ("close", 75), ("stop", 0)):
+            with self.subTest(blocked_method=blocked_method, exit_code=exit_code):
+                result = subprocess.run(
+                    [sys.executable, "-c", f'''
+import threading
+from unittest.mock import Mock
+import voxtape
+voxtape.AUDIO_SHUTDOWN_TIMEOUT_S = 0.05
+app = object.__new__(voxtape.MLXWhisperApp)
+app.stream = Mock()
+app.stream.{blocked_method}.side_effect = threading.Event().wait
+app._close_input_stream(timeout_exit_code={exit_code})
+raise RuntimeError("The blocked operation unexpectedly returned")
+'''],
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, exit_code, result.stderr)
+                self.assertIn("Microphone shutdown stalled", result.stdout)
+
+    def test_audio_shutdown_closes_after_stop_error_and_cancels_watchdog(self) -> None:
+        app = object.__new__(MLXWhisperApp)
+        stream = Mock()
+        stream.stop.side_effect = RuntimeError("device disconnected")
+        app.stream = stream
+        with patch("voxtape.threading.Timer") as timer:
+            app._close_input_stream()
+        stream.close.assert_called_once_with()
+        self.assertIsNone(app.stream)
+        timer.return_value.cancel.assert_called_once_with()
+
+    def test_bundled_runtime_uses_accessory_activation_policy(self) -> None:
+        application = Mock()
+        with (
+            patch.dict(os.environ, {"REDWHISPER_BUNDLED": "1"}),
+            patch(
+                "voxtape.AppKit.NSApplication",
+                SimpleNamespace(sharedApplication=Mock(return_value=application)),
+            ),
+        ):
+            configure_bundle_activation_policy()
+
+        application.setActivationPolicy_.assert_called_once_with(
+            AppKit.NSApplicationActivationPolicyAccessory
+        )
+
+    def test_bundled_runtime_starts_launcher_watchdog(self) -> None:
+        watchdog = Mock()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "REDWHISPER_BUNDLED": "1",
+                    "REDWHISPER_LAUNCHER_PID": "1234",
+                },
+            ),
+            patch("voxtape.threading.Thread", return_value=watchdog) as thread,
+        ):
+            start_launcher_watchdog()
+
+        self.assertEqual(thread.call_args.kwargs["args"], (1234,))
+        self.assertTrue(thread.call_args.kwargs["daemon"])
+        watchdog.start.assert_called_once_with()
+
+    def test_launcher_watchdog_exits_when_parent_disappears(self) -> None:
+        with (
+            patch("voxtape.os.getppid", side_effect=[1234, 1]),
+            patch("voxtape.time.sleep"),
+            patch("voxtape.os._exit", side_effect=SystemExit) as exit_process,
+            self.assertRaises(SystemExit),
+        ):
+            _watch_launcher(1234)
+
+        exit_process.assert_called_once_with(0)
+
     def test_restructuring_status_reflects_saved_provider(self) -> None:
         self.assertEqual(restructuring_label(AppSettings()), "Off")
         self.assertEqual(
@@ -177,6 +261,7 @@ class MLXWhisperAppTests(unittest.TestCase):
 
     def test_settings_restart_quits_child_for_bundle_supervisor(self) -> None:
         fake_app = SimpleNamespace(
+            _close_input_stream=Mock(),
             recording_indicator=Mock(),
             _level_timer=Mock(),
             stream=None,

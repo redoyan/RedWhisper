@@ -110,6 +110,7 @@ def recording_status_text(elapsed_seconds: float) -> str:
 MIN_DURATION_S = 0.8  # Ignore clips shorter than 800ms
 MIN_AUDIO_ENERGY = 0.0002  # Conservative silence guard; Whisper also detects no-speech
 SETTINGS_RESTART_EXIT_CODE = 75
+AUDIO_SHUTDOWN_TIMEOUT_S = 5.0
 
 # ─── Quartz Hotkey Listener ──────────────────────────────────────────────────
 
@@ -620,18 +621,31 @@ class MLXWhisperApp(rumps.App):
         )
         self.stream.start()
 
-    def _close_input_stream(self) -> None:
+    def _close_input_stream(self, timeout_exit_code: int = SETTINGS_RESTART_EXIT_CODE) -> None:
         stream, self.stream = self.stream, None
         if stream is None:
             return
+
+        def shutdown_timed_out():
+            # CoreAudio can deadlock inside stop/close while holding native
+            # locks. Only a fresh runtime can safely recover that audio state.
+            print("⚠️  Microphone shutdown stalled; exiting audio runtime.", flush=True)
+            os._exit(timeout_exit_code)
+
+        watchdog = threading.Timer(AUDIO_SHUTDOWN_TIMEOUT_S, shutdown_timed_out)
+        watchdog.daemon = True
+        watchdog.start()
         try:
-            stream.stop()
-        except Exception:
-            pass
-        try:
-            stream.close()
-        except Exception:
-            pass
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        finally:
+            watchdog.cancel()
 
     def _refresh_selected_input_device(self) -> None:
         devices = refresh_input_devices(sd)
@@ -856,26 +870,56 @@ class MLXWhisperApp(rumps.App):
     def _restart_after_settings_save(self):
         self.recording_indicator.hide()
         self._level_timer.stop()
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
+        self._close_input_stream()
         self._set_menu_status("⏳")
         self.record_menu_item.title = "Applying settings…"
         os._exit(SETTINGS_RESTART_EXIT_CODE)
 
     def _quit(self, _sender=None):
         self.recording_indicator.hide()
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
+        self._level_timer.stop()
+        self._close_input_stream(timeout_exit_code=0)
         rumps.quit_application()
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 
+def configure_bundle_activation_policy() -> None:
+    """Keep the bundled Python runtime out of the Dock."""
+    if os.environ.get("REDWHISPER_BUNDLED") == "1":
+        AppKit.NSApplication.sharedApplication().setActivationPolicy_(
+            AppKit.NSApplicationActivationPolicyAccessory
+        )
+
+
+def _watch_launcher(launcher_pid: int) -> None:
+    while os.getppid() == launcher_pid:
+        time.sleep(1)
+    os._exit(0)
+
+
+def start_launcher_watchdog() -> None:
+    """Exit the bundled runtime if Force Quit kills its native launcher."""
+    if os.environ.get("REDWHISPER_BUNDLED") != "1":
+        return
+    try:
+        launcher_pid = int(os.environ["REDWHISPER_LAUNCHER_PID"])
+    except (KeyError, ValueError):
+        return
+    if launcher_pid <= 1:
+        return
+    threading.Thread(
+        target=_watch_launcher,
+        args=(launcher_pid,),
+        name="redwhisper-launcher-watchdog",
+        daemon=True,
+    ).start()
+
+
 def main():
+    configure_bundle_activation_policy()
+    start_launcher_watchdog()
     parser = argparse.ArgumentParser(
         prog="mlx-whisper-app",
         description="RedWhisper — voice-to-text for Apple Silicon",

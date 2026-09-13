@@ -95,7 +95,6 @@ python3 voxtape.py "$@"
 LAUNCHER
 chmod +x start.sh
 
-chmod +x "RedWhisper.app/Contents/MacOS/RedWhisper"
 chmod +x build_app.sh
 ./build_app.sh
 
