@@ -563,8 +563,9 @@ launching the app:
 open RedWhisper.app
 ```
 
-The bundled launcher runs as a background menu-bar application. Development
-output is redirected to `~/Library/Logs/RedWhisper/app.log`.
+The bundled launcher owns the RedWhisper Dock icon while its Python runtime stays
+hidden as a menu-bar accessory process. Development output is redirected to
+`~/Library/Logs/RedWhisper/app.log`.
 
 ## Contributing
 

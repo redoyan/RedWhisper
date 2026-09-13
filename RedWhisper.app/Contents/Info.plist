@@ -5,7 +5,7 @@
     <key>CFBundleDisplayName</key>
     <string>RedWhisper</string>
     <key>CFBundleExecutable</key>
-    <string>RedWhisper</string>
+    <string>RedWhisperLauncher</string>
     <key>CFBundleIconFile</key>
     <string>RedWhisper.icns</string>
     <key>CFBundleIdentifier</key>
@@ -22,8 +22,6 @@
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
-    <key>LSUIElement</key>
-    <true/>
     <key>NSAppleEventsUsageDescription</key>
     <string>RedWhisper inserts your completed transcript into the active application.</string>
     <key>NSHighResolutionCapable</key>
