@@ -301,15 +301,86 @@ class OpenAITranscriberTests(unittest.TestCase):
             OpenAITranscriber(OpenAITranscriptionOptions(api_key=""))
 
     def test_only_supported_openai_transcription_models_are_allowed(self) -> None:
-        OpenAITranscriber(
-            OpenAITranscriptionOptions(
-                api_key="test-key", model="gpt-4o-mini-transcribe"
+        for model in (
+            "gpt-transcribe",
+            "gpt-4o-transcribe",
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-transcribe-diarize",
+            "whisper-1",
+        ):
+            OpenAITranscriber(
+                OpenAITranscriptionOptions(api_key="test-key", model=model)
             )
-        )
         with self.assertRaises(ConfigurationError):
             OpenAITranscriber(
                 OpenAITranscriptionOptions(api_key="test-key", model="unknown")
             )
+
+    def test_gpt_transcribe_uses_plural_language_hint(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"text":"Hello from GPT Transcribe."}'
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "speech.wav"
+            audio_path.write_bytes(b"RIFF-test-audio")
+            transcriber = OpenAITranscriber(
+                OpenAITranscriptionOptions(
+                    api_key="test-key",
+                    model="gpt-transcribe",
+                    language="en",
+                    prompt="Technical vocabulary",
+                )
+            )
+            with patch(
+                "urllib.request.urlopen", return_value=FakeResponse()
+            ) as urlopen:
+                text = transcriber.transcribe(audio_path)
+
+        body = urlopen.call_args.args[0].data
+        self.assertIn(b'name="languages[]"', body)
+        self.assertNotIn(b'name="language"\r\n', body)
+        self.assertIn(b"Technical vocabulary", body)
+        self.assertEqual(text, "Hello from GPT Transcribe.")
+
+    def test_diarization_model_requests_compatible_response(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"text":"A: Hello. B: Hi."}'
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "speech.wav"
+            audio_path.write_bytes(b"RIFF-test-audio")
+            transcriber = OpenAITranscriber(
+                OpenAITranscriptionOptions(
+                    api_key="test-key",
+                    model="gpt-4o-transcribe-diarize",
+                    language="en",
+                    prompt="This prompt is unsupported for diarization",
+                )
+            )
+            with patch(
+                "urllib.request.urlopen", return_value=FakeResponse()
+            ) as urlopen:
+                transcriber.transcribe(audio_path)
+
+        body = urlopen.call_args.args[0].data
+        self.assertIn(b"diarized_json", body)
+        self.assertIn(b"chunking_strategy", body)
+        self.assertIn(b"auto", body)
+        self.assertNotIn(b"This prompt is unsupported", body)
 
     def test_multipart_request_contains_model_audio_and_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -392,12 +463,11 @@ class ElevenLabsTranscriberTests(unittest.TestCase):
             ElevenLabsTranscriber(ElevenLabsTranscriptionOptions(api_key=""))
         with self.assertRaises(ConfigurationError):
             ElevenLabsTranscriber(
-                ElevenLabsTranscriptionOptions(api_key="test-key", model="scribe_v1")
-            )
-        with self.assertRaises(ConfigurationError):
-            ElevenLabsTranscriber(
                 ElevenLabsTranscriptionOptions(api_key="test-key", model="eleven_v3")
             )
+        ElevenLabsTranscriber(
+            ElevenLabsTranscriptionOptions(api_key="test-key", model="scribe_v1")
+        )
         ElevenLabsTranscriber(
             ElevenLabsTranscriptionOptions(
                 api_key="test-key", model="scribe_v2_realtime"

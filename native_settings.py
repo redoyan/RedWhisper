@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import threading
+import webbrowser
 from pathlib import Path
 from typing import Callable
 
@@ -10,6 +12,7 @@ import AppKit
 import objc
 
 from audio_devices import InputDevice
+from chatgpt_subscription import ChatGPTError, ChatGPTSubscription, USAGE_URL
 from hotkey_config import HotkeyConfig, custom_hotkey_value, modifier_hotkey_value
 from mlx_whisper_core import (
     ConfigurationError,
@@ -27,24 +30,33 @@ from settings_store import AppSettings
 
 TRANSCRIPTION_MODEL_VALUES = [
     ("local", None),
+    ("openai", "gpt-transcribe"),
     ("openai", "gpt-4o-transcribe"),
     ("openai", "gpt-4o-mini-transcribe"),
+    ("openai", "gpt-4o-transcribe-diarize"),
+    ("openai", "whisper-1"),
     ("elevenlabs", "scribe_v2"),
     ("elevenlabs", "scribe_v2_realtime"),
+    ("elevenlabs", "scribe_v1"),
 ]
 TRANSCRIPTION_MODEL_LABELS = [
     "Whisper Large v3 Turbo — Local",
+    "GPT Transcribe — OpenAI recommended",
     "GPT-4o Transcribe — OpenAI accuracy",
     "GPT-4o Mini Transcribe — OpenAI speed",
+    "GPT-4o Transcribe Diarize — OpenAI speakers",
+    "Whisper-1 — OpenAI legacy",
     "Scribe v2 — ElevenLabs",
     "Scribe v2 Realtime — ElevenLabs streaming",
+    "Scribe v1 — ElevenLabs legacy",
 ]
-REWRITE_ENGINE_VALUES = ["off", "local", "openai", "openrouter"]
+REWRITE_ENGINE_VALUES = ["off", "local", "openai", "openrouter", "chatgpt"]
 REWRITE_ENGINE_LABELS = [
     "Off — transcription only",
     "Local Llama 3B — free & private",
     "OpenAI API — automatic tone",
     "OpenRouter — free models",
+    "ChatGPT subscription",
 ]
 OPENAI_REWRITE_MODEL_VALUES = list(OPENAI_REWRITE_MODELS)
 OPENAI_REWRITE_MODEL_LABELS = [
@@ -98,6 +110,12 @@ class NativeSettingsController(AppKit.NSObject):
             None,
         )
         self._close_notified = False
+        self.chatgpt = ChatGPTSubscription()
+        self._chatgpt_busy = False
+        self._chatgpt_cancel = threading.Event()
+        self._chatgpt_state = {}
+        self.chatgpt_model_values = [""]
+        self.chatgpt_account_window = None
         self._build_window()
 
     @objc.python_method
@@ -276,7 +294,9 @@ class NativeSettingsController(AppKit.NSObject):
         content.addSubview_(self.maximum_accuracy)
 
         rewrite_engine = (
-            "openrouter"
+            "chatgpt"
+            if self.settings.post_process_chatgpt
+            else "openrouter"
             if self.settings.post_process_openrouter
             else "openai"
             if self.settings.post_process_openai
@@ -324,6 +344,15 @@ class NativeSettingsController(AppKit.NSObject):
         )
         self.openrouter_model_field.setPlaceholderString_("openrouter/free")
         content.addSubview_(self.openrouter_model_field)
+        self.chatgpt_model_popup = self._popup(446, 61, 209, ["Automatic — account default"])
+        if self.settings.chatgpt_rewrite_model:
+            self.chatgpt_model_values.append(self.settings.chatgpt_rewrite_model)
+            self.chatgpt_model_popup.addItemWithTitle_(self.settings.chatgpt_rewrite_model + " — sync needed")
+            self.chatgpt_model_popup.selectItemAtIndex_(1)
+        content.addSubview_(self.chatgpt_model_popup)
+        account = AppKit.NSButton.buttonWithTitle_target_action_("ChatGPT account…", self, "showChatGPTAccount:")
+        account.setFrame_(AppKit.NSMakeRect(24, 11, 180, 32))
+        content.addSubview_(account)
         self.rewriteEngineChanged_(None)
 
         cancel = AppKit.NSButton.buttonWithTitle_target_action_(
@@ -638,6 +667,7 @@ class NativeSettingsController(AppKit.NSObject):
         self._start_device_timer()
         AppKit.NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
+        self._run_chatgpt("refresh")
 
     @staticmethod
     @objc.python_method
@@ -840,8 +870,14 @@ class NativeSettingsController(AppKit.NSObject):
         self._stop_device_timer()
         self._stop_editing_shortcut_monitor()
         self.on_close()
+        self._chatgpt_cancel.set()
+        if self.chatgpt_account_window:
+            self.chatgpt_account_window.orderOut_(None)
 
     def saveSettings_(self, _sender) -> None:
+        if self._chatgpt_busy:
+            self._show_error("Wait for the ChatGPT account operation to finish, or cancel sign-in.")
+            return
         self._end_shortcut_capture()
         primary = self.primary_shortcut_value
         secondary = self.secondary_shortcut_value
@@ -881,6 +917,8 @@ class NativeSettingsController(AppKit.NSObject):
             post_process_local=rewrite_engine == "local",
             post_process_openai=rewrite_engine == "openai",
             post_process_openrouter=rewrite_engine == "openrouter",
+            post_process_chatgpt=rewrite_engine == "chatgpt",
+            chatgpt_rewrite_model=_selected_value(self.chatgpt_model_popup, self.chatgpt_model_values),
             hotkey_preset=primary,
             secondary_hotkey_preset=secondary,
             microphone_gain=_selected_value(self.gain_popup, GAIN_VALUES),
@@ -905,6 +943,12 @@ class NativeSettingsController(AppKit.NSObject):
         )
         try:
             updated.validate()
+            if updated.post_process_chatgpt:
+                models = {item["slug"] for item in self._chatgpt_state.get("models", [])}
+                if not self._chatgpt_state.get("connected") or not models:
+                    raise ConfigurationError("Connect your ChatGPT subscription and refresh models using ChatGPT account… first.")
+                if updated.chatgpt_rewrite_model and updated.chatgpt_rewrite_model not in models:
+                    raise ConfigurationError("The selected ChatGPT model is unavailable. Choose a model from the synchronized list.")
             provided_key = self.api_key_field.stringValue().strip()
             if provided_key:
                 save_openai_key(provided_key)
@@ -945,8 +989,142 @@ class NativeSettingsController(AppKit.NSObject):
             self.rewrite_engine_popup, REWRITE_ENGINE_VALUES
         )
         self.openai_rewrite_model_popup.setEnabled_(selected == "openai")
-        self.openai_rewrite_model_popup.setHidden_(selected == "openrouter")
+        self.openai_rewrite_model_popup.setHidden_(selected in {"openrouter", "chatgpt"})
         self.openrouter_model_field.setHidden_(selected != "openrouter")
+        self.chatgpt_model_popup.setHidden_(selected != "chatgpt")
+
+    def showChatGPTAccount_(self, _sender) -> None:
+        if self.chatgpt_account_window is None:
+            rect = AppKit.NSMakeRect(0, 0, 620, 290)
+            self.chatgpt_account_window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                rect, AppKit.NSWindowStyleMaskTitled | AppKit.NSWindowStyleMaskClosable,
+                AppKit.NSBackingStoreBuffered, False)
+            self.chatgpt_account_window.setTitle_("ChatGPT subscription — rephrasing only")
+            self.chatgpt_account_window.setReleasedWhenClosed_(False)
+            self.chatgpt_account_window.center()
+            content = AppKit.NSVisualEffectView.alloc().initWithFrame_(rect)
+            content.setMaterial_(AppKit.NSVisualEffectMaterialUnderWindowBackground)
+            content.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+            content.setState_(AppKit.NSVisualEffectStateActive)
+            self.chatgpt_account_window.setContentView_(content)
+            self.chatgpt_status = self._text("Not connected", 24, 193, 572, 70, 13)
+            content.addSubview_(self.chatgpt_status)
+            self.chatgpt_accounts = self._popup(24, 154, 572, ["No saved accounts"])
+            self.chatgpt_accounts.setTarget_(self)
+            self.chatgpt_accounts.setAction_("chatGPTAccountChanged:")
+            content.addSubview_(self.chatgpt_accounts)
+            for title, action, x, y, width in (
+                ("Continue with ChatGPT", "connectChatGPT:", 24, 110, 210),
+                ("Add account", "addChatGPTAccount:", 240, 110, 120),
+                ("Refresh models", "refreshChatGPT:", 368, 110, 130),
+                ("Disconnect", "disconnectChatGPT:", 24, 65, 110),
+                ("Manage usage", "manageChatGPTUsage:", 142, 65, 140),
+                ("Cancel sign-in", "cancelChatGPTSignIn:", 290, 65, 130),
+            ):
+                button = AppKit.NSButton.buttonWithTitle_target_action_(title, self, action)
+                button.setFrame_(AppKit.NSMakeRect(x, y, width, 32))
+                content.addSubview_(button)
+            content.addSubview_(self._text("Uses your plan allowance. Transcription keeps its existing API billing.", 24, 21, 572, 25, 12))
+        self.chatgpt_account_window.makeKeyAndOrderFront_(None)
+        self._update_chatgpt_controls()
+        self._run_chatgpt("refresh")
+
+    @objc.python_method
+    def _run_chatgpt(self, operation, account_id=None):
+        if self._chatgpt_busy:
+            return
+        self._chatgpt_busy = True
+        self._chatgpt_cancel = threading.Event()
+        self._update_chatgpt_controls("Connecting in your browser…" if operation in {"connect", "add"} else "Synchronizing ChatGPT…")
+
+        def work():
+            message = ""
+            try:
+                if operation in {"connect", "add"}:
+                    self.chatgpt.sign_in(new_account=operation == "add", cancel=self._chatgpt_cancel)
+                    message = "You're using your ChatGPT plan. Choose a model, then Save Settings."
+                elif operation == "disconnect":
+                    if not self.chatgpt.disconnect():
+                        message = "Disconnected locally. Remote revocation was not confirmed; disconnect in ChatGPT settings too."
+                elif operation == "select":
+                    self.chatgpt.select_account(account_id)
+                elif self.chatgpt.snapshot()["connected"]:
+                    self.chatgpt.sync_models()
+            except ChatGPTError as error:
+                message = str(error)
+            except Exception:
+                message = "Could not update the ChatGPT connection. Please try again."
+            try:
+                state = self.chatgpt.snapshot()
+            except Exception:
+                state = {}
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "chatGPTFinished:", {"state": state, "message": message, "operation": operation}, False)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def chatGPTFinished_(self, result) -> None:
+        self._chatgpt_busy = False
+        if self._close_notified:
+            return
+        previous_account = self._chatgpt_state.get("active")
+        self._chatgpt_state = dict(result["state"])
+        selected = _selected_value(self.chatgpt_model_popup, self.chatgpt_model_values)
+        if previous_account and previous_account != self._chatgpt_state.get("active"):
+            selected = ""
+        models = self._chatgpt_state.get("models", [])
+        self.chatgpt_model_values = [""] + [model["slug"] for model in models]
+        labels = ["Automatic — account default"] + [model["display_name"] for model in models]
+        # NSPopUpButton coalesces duplicate titles; keep one item per model.
+        labels = [labels[0]] + [
+            label if labels.count(label) == 1 else f"{label} ({model['slug']})"
+            for label, model in zip(labels[1:], models)
+        ]
+        if selected and selected not in self.chatgpt_model_values:
+            self.chatgpt_model_values.append(selected)
+            labels.append(selected + " — unavailable")
+        self.chatgpt_model_popup.removeAllItems()
+        self.chatgpt_model_popup.addItemsWithTitles_(labels)
+        _select_value(self.chatgpt_model_popup, self.chatgpt_model_values, selected)
+        if result.get("operation") in {"connect", "add"} and self._chatgpt_state.get("connected") and models:
+            _select_value(self.rewrite_engine_popup, REWRITE_ENGINE_VALUES, "chatgpt")
+            self.rewriteEngineChanged_(None)
+        self._update_chatgpt_controls(result["message"])
+
+    @objc.python_method
+    def _update_chatgpt_controls(self, message=""):
+        if self.chatgpt_account_window is None:
+            return
+        state = self._chatgpt_state
+        status = (f"Using ChatGPT plan · {state.get('email', '')} · {len(state.get('models', []))} models" if state.get("connected") else "Not connected to a ChatGPT plan")
+        self.chatgpt_status.setStringValue_(status + ("\n" + message if message else ""))
+        self.chatgpt_account_ids = [account["id"] for account in state.get("accounts", [])]
+        self.chatgpt_accounts.removeAllItems()
+        self.chatgpt_accounts.addItemsWithTitles_([account["label"] for account in state.get("accounts", [])] or ["No saved accounts"])
+        _select_value(self.chatgpt_accounts, self.chatgpt_account_ids, state.get("active"))
+        self.chatgpt_accounts.setEnabled_(not self._chatgpt_busy and bool(self.chatgpt_account_ids))
+
+    def connectChatGPT_(self, _sender):
+        self._run_chatgpt("connect")
+
+    def addChatGPTAccount_(self, _sender):
+        self._run_chatgpt("add")
+
+    def refreshChatGPT_(self, _sender):
+        self._run_chatgpt("refresh")
+
+    def disconnectChatGPT_(self, _sender):
+        self._run_chatgpt("disconnect")
+
+    def cancelChatGPTSignIn_(self, _sender):
+        self._chatgpt_cancel.set()
+
+    def manageChatGPTUsage_(self, _sender):
+        webbrowser.open(USAGE_URL)
+
+    def chatGPTAccountChanged_(self, _sender):
+        if self.chatgpt_account_ids:
+            self._run_chatgpt("select", _selected_value(self.chatgpt_accounts, self.chatgpt_account_ids))
 
     @staticmethod
     @objc.python_method

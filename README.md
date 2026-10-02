@@ -70,6 +70,40 @@ when available, keep restructuring local, or turn cloud features off entirely.
 
 ## Why Red Whisper
 
+### Use a ChatGPT subscription for rephrasing
+
+Transcription and rephrasing have separate provider settings. You can keep
+OpenAI or ElevenLabs API transcription and use an eligible ChatGPT Plus or Pro
+plan for the text-rephrasing step:
+
+1. Open **RedWhisper → Settings → ChatGPT account…**.
+2. Click **Continue with ChatGPT** and approve **Use your ChatGPT plan** in your browser.
+3. Return to Settings, select **ChatGPT subscription** under Restructuring,
+   select a model, and click **Save Settings**. Leave your transcription choice unchanged.
+
+The model picker synchronizes the connected account's entire user-visible model
+catalog after sign-in, account switching, and opening Settings. **Refresh models**
+forces an update; active rewriting refreshes a catalog older than one hour.
+**Automatic** follows the first model in OpenAI's account catalog order. An
+explicitly selected model that disappears is marked unavailable, not silently
+replaced. This lists models available through the integration, which can differ
+from ChatGPT's own model picker.
+
+OAuth credentials are stored separately from API keys in macOS Keychain. The
+subscription route sends transcript text, not audio, to the public Responses API.
+It consumes your existing plan allowance; use **Manage usage** to control app
+limits. If sign-in, quota, or rewriting fails, RedWhisper keeps the original
+transcript and reports a warning. It never falls back to paid API rephrasing.
+**Disconnect** clears local credentials and attempts remote session revocation.
+
+Account linking requires your own browser approval. API transcription remains
+separately billed, and subscription eligibility is determined by OpenAI.
+See [Sign in with ChatGPT](https://developers.openai.com/siwc/quickstart) and
+[supported capabilities](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+
+The optional launch-time browser form can use a previously connected account;
+account linking and switching are managed in the native Settings window.
+
 | Capability | What it means |
 |---|---|
 | **No app subscription** | Install the open-source app and choose whether any provider usage is worth paying for. |
@@ -84,8 +118,8 @@ when available, keep restructuring local, or turn cloud features off entirely.
 ### Highlights
 
 - Local `mlx-community/whisper-large-v3-turbo` transcription by default
-- Optional `gpt-4o-transcribe` and `gpt-4o-mini-transcribe` cloud engines
-- Optional ElevenLabs `scribe_v2` and `scribe_v2_realtime` cloud transcription engines
+- OpenAI file-transcription models, including the recommended `gpt-transcribe`
+- ElevenLabs `scribe_v2`, `scribe_v2_realtime`, and legacy `scribe_v1` transcription
 - Configurable primary and secondary push-to-talk shortcuts
 - Support for single modifier keys, including Fn/Globe, Control, and Option
 - Compact liquid-glass recording island with a subtle live waveform and timer
@@ -108,7 +142,7 @@ flowchart LR
     A[Hold shortcut] --> B[Record microphone]
     B --> C{Transcription engine}
     C -->|Default| D[MLX Whisper<br>on your Mac]
-    C -->|Explicit opt-in| E[GPT-4o Transcribe<br>via OpenAI]
+    C -->|Explicit opt-in| E[OpenAI Transcription API]
     C -->|Explicit opt-in| L[Scribe v2<br>via ElevenLabs]
     D --> F[Local term replacement]
     E --> F
@@ -236,10 +270,14 @@ microphone, and shortcuts take effect without launching a second instance.
 | Engine | Processing location | Best for | Tradeoff |
 |---|---|---|---|
 | **Whisper Large v3 Turbo** | Local Apple Silicon GPU | Privacy and offline dictation | Uses local memory and compute |
+| **GPT Transcribe** | OpenAI API | Recommended general-purpose cloud transcription | Sends each recording to OpenAI |
 | **GPT-4o Mini Transcribe** | OpenAI API | Faster cloud transcription | Sends each recording to OpenAI |
 | **GPT-4o Transcribe** | OpenAI API | Maximum cloud accuracy | Sends each recording to OpenAI |
+| **GPT-4o Transcribe Diarize** | OpenAI API | Speaker-aware transcription | Sends each recording to OpenAI |
+| **Whisper-1** | OpenAI API | Legacy timestamps and formats | Sends each recording to OpenAI |
 | **ElevenLabs Scribe v2** | ElevenLabs API | High-accuracy multilingual transcription | Sends each recording to ElevenLabs |
 | **ElevenLabs Scribe v2 Realtime** | ElevenLabs WebSocket API | Streaming transcription after release | Sends each recording to ElevenLabs |
+| **ElevenLabs Scribe v1** | ElevenLabs API | Legacy compatibility | Sends each recording to ElevenLabs |
 
 ### Local MLX Whisper
 
@@ -258,11 +296,15 @@ and a 2.70 GB peak memory footprint. Treat **about 3 GB** as a practical
 estimate, not a guarantee; recording length, macOS version, and enabled options
 all affect resource use.
 
-### GPT-4o Transcribe
+### OpenAI transcription
 
-Choose either OpenAI model in Settings and enter an API key. Red Whisper stores
+Choose an OpenAI file-transcription model in Settings and enter an API key. Red Whisper stores
 the key in **macOS Keychain**, never in `settings.json` or the repository. Once
 saved, the key persists across restarts and can be replaced from Settings.
+
+`gpt-transcribe` is the recommended default for new recorded-audio workflows.
+The diarization model automatically requests speaker-labelled JSON, while
+`whisper-1` remains available for legacy compatibility.
 
 OpenAI API usage is billed through the API Platform account associated with the
 key. A ChatGPT Plus, Pro, Business, or Enterprise subscription is not used as
@@ -279,8 +321,8 @@ Never place an API key in this repository or in `replacements.json`.
 
 ### ElevenLabs Scribe
 
-Choose **Scribe v2** or **Scribe v2 Realtime** in Settings and enter an
-ElevenLabs API key.
+Choose **Scribe v2**, **Scribe v2 Realtime**, or legacy **Scribe v1** in
+Settings and enter an ElevenLabs API key.
 The key is stored separately in macOS Keychain and persists across restarts.
 Red Whisper uploads the completed WAV recording to ElevenLabs only when this
 engine is selected, requests clean text without audio-event tags, and then runs
@@ -296,7 +338,7 @@ Whisper records locally while the shortcut is held, then streams the completed
 16 kHz PCM recording after release so the existing push-to-talk, silence guard,
 local replacements, and optional restructuring behavior remain consistent.
 
-Only models explicitly documented by ElevenLabs as speech-to-text are included.
+All models explicitly documented by ElevenLabs as speech-to-text are included.
 The general model-list endpoint also returns text-to-speech, voice-conversion,
 music, and sound-generation models without an STT capability flag, so Red
 Whisper does not populate this selector from that response. In particular,
@@ -403,8 +445,8 @@ are inserted exactly as written.
 | Local Whisper | No | No |
 | Local Whisper + replacements | No | No |
 | Local Whisper + local restructuring | No | No |
-| Either GPT-4o Transcribe engine | Yes, to OpenAI | Only with cloud restructuring |
-| Either ElevenLabs Scribe engine | Yes, to ElevenLabs | Only with cloud restructuring |
+| Any OpenAI transcription model | Yes, to OpenAI | Only with cloud restructuring |
+| Any ElevenLabs Scribe model | Yes, to ElevenLabs | Only with cloud restructuring |
 | Local transcription + OpenAI restructuring | No | Yes, to OpenAI |
 | Local transcription + OpenRouter restructuring | No | Yes, to OpenRouter |
 
@@ -475,6 +517,10 @@ automation. The normal user experience is the menu-bar application.
 # Use GPT-4o Mini Transcribe
 ./start.sh --no-launch-gui --engine openai \
   --openai-model gpt-4o-mini-transcribe
+
+# Use the recommended OpenAI file-transcription model
+./start.sh --no-launch-gui --engine openai \
+  --openai-model gpt-transcribe
 
 # Use ElevenLabs Scribe v2
 ./start.sh --no-launch-gui --engine elevenlabs \
@@ -551,8 +597,9 @@ launching the app:
 open RedWhisper.app
 ```
 
-The bundled launcher runs as a background menu-bar application. Development
-output is redirected to `~/Library/Logs/RedWhisper/app.log`.
+The bundled launcher owns the RedWhisper Dock icon while its Python runtime stays
+hidden as a menu-bar accessory process. Development output is redirected to
+`~/Library/Logs/RedWhisper/app.log`.
 
 ## Contributing
 

@@ -25,12 +25,16 @@ ELEVENLABS_TRANSCRIPTION_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENAI_TRANSCRIPTION_MODELS = (
+    "gpt-transcribe",
     "gpt-4o-transcribe",
     "gpt-4o-mini-transcribe",
+    "gpt-4o-transcribe-diarize",
+    "whisper-1",
 )
 ELEVENLABS_TRANSCRIPTION_MODELS = (
     "scribe_v2",
     "scribe_v2_realtime",
+    "scribe_v1",
 )
 OPENAI_REWRITE_MODELS = (
     "gpt-5-nano",
@@ -144,14 +148,23 @@ class OpenAITranscriber:
 
     def transcribe(self, audio_path: Path) -> str:
         boundary = f"----mlx-whisper-{uuid.uuid4().hex}"
-        fields = {
-            "model": self.options.model,
-            "response_format": "json",
-        }
-        if self.options.language:
-            fields["language"] = self.options.language
-        if self.options.prompt:
-            fields["prompt"] = self.options.prompt
+        fields = {"model": self.options.model}
+        if self.options.model == "gpt-4o-transcribe-diarize":
+            fields.update(
+                response_format="diarized_json",
+                chunking_strategy="auto",
+            )
+        else:
+            fields["response_format"] = "json"
+            if self.options.language:
+                language_field = (
+                    "languages[]"
+                    if self.options.model == "gpt-transcribe"
+                    else "language"
+                )
+                fields[language_field] = self.options.language
+            if self.options.prompt:
+                fields["prompt"] = self.options.prompt
 
         body = self._multipart_body(boundary, fields, audio_path)
         request = urllib.request.Request(

@@ -20,6 +20,12 @@ from launch_gui import (
 
 
 class LaunchGUIPageTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("launch_gui.ChatGPTSubscription")
+        self.subscription = patcher.start().return_value
+        self.subscription.snapshot.return_value = {"connected": False}
+        self.addCleanup(patcher.stop)
+
     def test_saved_api_key_is_not_requested_again(self) -> None:
         control = _api_key_control(has_openai_key=True)
         self.assertIn("Saved securely in macOS Keychain", control)
@@ -54,8 +60,13 @@ class LaunchGUIPageTests(unittest.TestCase):
         self.assertIn("Whisper Large v3 Turbo", page)
         self.assertIn("GPT-4o Transcribe", page)
         self.assertIn("GPT-4o Mini Transcribe", page)
+        self.assertIn("GPT Transcribe", page)
+        self.assertIn("GPT-4o Transcribe Diarize", page)
+        self.assertIn("Whisper-1", page)
         self.assertIn("ElevenLabs Scribe", page)
         self.assertIn("Scribe v2 Realtime", page)
+        self.assertIn("Scribe v1", page)
+        self.assertNotIn("Eleven v3", page)
         self.assertIn('name="elevenlabs_model"', page)
         self.assertIn('name="openai_model"', page)
         self.assertIn("16 GB unified memory", page)

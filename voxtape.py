@@ -38,6 +38,7 @@ from audio_devices import (
 )
 from hotkey_config import ActiveHotkeys, HotkeyConfig, PushToTalkLatch
 from settings_store import AppSettings, SettingsStore
+from chatgpt_subscription import ChatGPTTextPostProcessor
 
 from mlx_whisper_core import (
     ConfigurationError,
@@ -78,6 +79,8 @@ SAMPLE_RATE = 16000
 
 
 def restructuring_label(settings: AppSettings) -> str:
+    if settings.post_process_chatgpt:
+        return f"ChatGPT plan · {settings.chatgpt_rewrite_model or 'Automatic'}"
     if settings.post_process_local:
         return "Local Llama 3B"
     if settings.post_process_openai:
@@ -110,6 +113,7 @@ def recording_status_text(elapsed_seconds: float) -> str:
 MIN_DURATION_S = 0.8  # Ignore clips shorter than 800ms
 MIN_AUDIO_ENERGY = 0.0002  # Conservative silence guard; Whisper also detects no-speech
 SETTINGS_RESTART_EXIT_CODE = 75
+AUDIO_SHUTDOWN_TIMEOUT_S = 5.0
 
 # ─── Quartz Hotkey Listener ──────────────────────────────────────────────────
 
@@ -253,12 +257,12 @@ def quartz_all_modifier_mask() -> int:
     )
 
 
-WAVEFORM_BAR_RGBA = (0.56, 0.37, 0.22, 0.78)
+WAVEFORM_LINE_RGBA = (0.22, 0.17, 0.14, 0.72)
 RECORDING_GLASS_ALPHA = 0.72
 
 
 class WaveformView(AppKit.NSView):
-    """Draw a compact, live audio waveform without text glyphs."""
+    """Draw a compact, continuous line that responds to live audio levels."""
 
     def initWithFrame_(self, frame):
         self = AppKit.NSView.initWithFrame_(self, frame)
@@ -273,25 +277,40 @@ class WaveformView(AppKit.NSView):
     def drawRect_(self, _dirty_rect) -> None:
         bounds = self.bounds()
         count = len(self._levels)
-        gap = 6.0
-        bar_width = 2.5
-        waveform_width = count * bar_width + (count - 1) * gap
-        start_x = (bounds.size.width - waveform_width) / 2
-        max_height = max(3.0, bounds.size.height - 10.0)
-        AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
-            *WAVEFORM_BAR_RGBA
-        ).setFill()
+        if count < 2:
+            return
 
+        horizontal_padding = 8.0
+        step = (bounds.size.width - horizontal_padding * 2) / (count - 1)
+        center_y = bounds.size.height / 2
+        amplitude = max(1.0, center_y - 5.0)
+        points = []
         for index, level in enumerate(self._levels):
-            height = 3.0 + max_height * max(0.0, min(1.0, level))
-            x = start_x + index * (bar_width + gap)
-            y = (bounds.size.height - height) / 2
-            path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                AppKit.NSMakeRect(x, y, bar_width, height),
-                bar_width / 2,
-                bar_width / 2,
+            normalized = max(0.0, min(1.0, level))
+            direction = -1.0 if index % 2 else 1.0
+            points.append(
+                AppKit.NSMakePoint(
+                    horizontal_padding + index * step,
+                    center_y + direction * normalized * amplitude,
+                )
             )
-            path.fill()
+
+        AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
+            *WAVEFORM_LINE_RGBA
+        ).setStroke()
+        path = AppKit.NSBezierPath.bezierPath()
+        path.setLineWidth_(2.0)
+        path.setLineCapStyle_(AppKit.NSRoundLineCapStyle)
+        path.setLineJoinStyle_(AppKit.NSRoundLineJoinStyle)
+        path.moveToPoint_(points[0])
+        for previous, point in zip(points, points[1:]):
+            midpoint_x = (previous.x + point.x) / 2
+            path.curveToPoint_controlPoint1_controlPoint2_(
+                point,
+                AppKit.NSMakePoint(midpoint_x, previous.y),
+                AppKit.NSMakePoint(midpoint_x, point.y),
+            )
+        path.stroke()
 
 
 class RecordingIndicator:
@@ -605,18 +624,31 @@ class MLXWhisperApp(rumps.App):
         )
         self.stream.start()
 
-    def _close_input_stream(self) -> None:
+    def _close_input_stream(self, timeout_exit_code: int = SETTINGS_RESTART_EXIT_CODE) -> None:
         stream, self.stream = self.stream, None
         if stream is None:
             return
+
+        def shutdown_timed_out():
+            # CoreAudio can deadlock inside stop/close while holding native
+            # locks. Only a fresh runtime can safely recover that audio state.
+            print("⚠️  Microphone shutdown stalled; exiting audio runtime.", flush=True)
+            os._exit(timeout_exit_code)
+
+        watchdog = threading.Timer(AUDIO_SHUTDOWN_TIMEOUT_S, shutdown_timed_out)
+        watchdog.daemon = True
+        watchdog.start()
         try:
-            stream.stop()
-        except Exception:
-            pass
-        try:
-            stream.close()
-        except Exception:
-            pass
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        finally:
+            watchdog.cancel()
 
     def _refresh_selected_input_device(self) -> None:
         devices = refresh_input_devices(sd)
@@ -841,26 +873,56 @@ class MLXWhisperApp(rumps.App):
     def _restart_after_settings_save(self):
         self.recording_indicator.hide()
         self._level_timer.stop()
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
+        self._close_input_stream()
         self._set_menu_status("⏳")
         self.record_menu_item.title = "Applying settings…"
         os._exit(SETTINGS_RESTART_EXIT_CODE)
 
     def _quit(self, _sender=None):
         self.recording_indicator.hide()
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
+        self._level_timer.stop()
+        self._close_input_stream(timeout_exit_code=0)
         rumps.quit_application()
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 
+def configure_bundle_activation_policy() -> None:
+    """Keep the bundled Python runtime out of the Dock."""
+    if os.environ.get("REDWHISPER_BUNDLED") == "1":
+        AppKit.NSApplication.sharedApplication().setActivationPolicy_(
+            AppKit.NSApplicationActivationPolicyAccessory
+        )
+
+
+def _watch_launcher(launcher_pid: int) -> None:
+    while os.getppid() == launcher_pid:
+        time.sleep(1)
+    os._exit(0)
+
+
+def start_launcher_watchdog() -> None:
+    """Exit the bundled runtime if Force Quit kills its native launcher."""
+    if os.environ.get("REDWHISPER_BUNDLED") != "1":
+        return
+    try:
+        launcher_pid = int(os.environ["REDWHISPER_LAUNCHER_PID"])
+    except (KeyError, ValueError):
+        return
+    if launcher_pid <= 1:
+        return
+    threading.Thread(
+        target=_watch_launcher,
+        args=(launcher_pid,),
+        name="redwhisper-launcher-watchdog",
+        daemon=True,
+    ).start()
+
+
 def main():
+    configure_bundle_activation_policy()
+    start_launcher_watchdog()
     parser = argparse.ArgumentParser(
         prog="mlx-whisper-app",
         description="RedWhisper — voice-to-text for Apple Silicon",
@@ -914,6 +976,14 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Enable automatic casual/professional rewriting through OpenRouter",
+    )
+    parser.add_argument(
+        "--post-process-chatgpt", action=argparse.BooleanOptionalAction,
+        default=None, help="Rewrite using your connected ChatGPT subscription",
+    )
+    parser.add_argument(
+        "--chatgpt-rewrite-model", default=None,
+        help="Account model slug; empty selects the first available account model",
     )
     parser.add_argument(
         "--local-llm-model",
@@ -1012,6 +1082,10 @@ def main():
         args.post_process_openai = saved_settings.post_process_openai
     if args.post_process_openrouter is None:
         args.post_process_openrouter = saved_settings.post_process_openrouter
+    if args.post_process_chatgpt is None:
+        args.post_process_chatgpt = saved_settings.post_process_chatgpt
+    if args.chatgpt_rewrite_model is None:
+        args.chatgpt_rewrite_model = saved_settings.chatgpt_rewrite_model
     args.hotkey = args.hotkey or saved_settings.hotkey_preset
     args.secondary_hotkey = (
         args.secondary_hotkey or saved_settings.secondary_hotkey_preset
@@ -1038,6 +1112,7 @@ def main():
             args.post_process_local,
             args.post_process_openai,
             args.post_process_openrouter,
+            args.post_process_chatgpt,
         )
     ) > 1:
         parser.error("Select only one restructuring engine")
@@ -1082,6 +1157,8 @@ def main():
             post_process_local=args.post_process_local,
             post_process_openai=args.post_process_openai,
             post_process_openrouter=args.post_process_openrouter,
+            post_process_chatgpt=args.post_process_chatgpt,
+            chatgpt_rewrite_model=args.chatgpt_rewrite_model,
             hotkey_preset=args.hotkey,
             secondary_hotkey_preset=args.secondary_hotkey,
             microphone_gain=args.microphone_gain,
@@ -1099,6 +1176,8 @@ def main():
         args.post_process_local = selection.post_process_local
         args.post_process_openai = selection.post_process_openai
         args.post_process_openrouter = selection.post_process_openrouter
+        args.post_process_chatgpt = selection.post_process_chatgpt
+        args.chatgpt_rewrite_model = selection.chatgpt_rewrite_model
         args.hotkey = selection.hotkey_preset
         args.secondary_hotkey = selection.secondary_hotkey_preset
         args.microphone_gain = selection.microphone_gain
@@ -1121,6 +1200,8 @@ def main():
                     post_process_local=args.post_process_local,
                     post_process_openai=args.post_process_openai,
                     post_process_openrouter=args.post_process_openrouter,
+                    post_process_chatgpt=args.post_process_chatgpt,
+                    chatgpt_rewrite_model=args.chatgpt_rewrite_model,
                     hotkey_preset=args.hotkey,
                     secondary_hotkey_preset=args.secondary_hotkey,
                     microphone_gain=args.microphone_gain,
@@ -1148,6 +1229,8 @@ def main():
         post_process_local=args.post_process_local,
         post_process_openai=args.post_process_openai,
         post_process_openrouter=args.post_process_openrouter,
+        post_process_chatgpt=args.post_process_chatgpt,
+        chatgpt_rewrite_model=args.chatgpt_rewrite_model,
         hotkey_preset=args.hotkey,
         secondary_hotkey_preset=args.secondary_hotkey,
         microphone_gain=args.microphone_gain,
@@ -1207,6 +1290,8 @@ def main():
         if args.post_process_local:
             local_post_processor = LocalLLMPostProcessor(args.local_llm_model)
             post_processor = local_post_processor
+        elif args.post_process_chatgpt:
+            post_processor = ChatGPTTextPostProcessor(args.chatgpt_rewrite_model)
         elif args.post_process_openai:
             post_processor = OpenAITextPostProcessor(
                 OpenAIRewriteOptions(
