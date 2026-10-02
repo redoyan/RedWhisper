@@ -70,6 +70,40 @@ when available, keep restructuring local, or turn cloud features off entirely.
 
 ## Why Red Whisper
 
+### Use a ChatGPT subscription for rephrasing
+
+Transcription and rephrasing have separate provider settings. You can keep
+OpenAI or ElevenLabs API transcription and use an eligible ChatGPT Plus or Pro
+plan for the text-rephrasing step:
+
+1. Open **RedWhisper → Settings → ChatGPT account…**.
+2. Click **Continue with ChatGPT** and approve **Use your ChatGPT plan** in your browser.
+3. Return to Settings, select **ChatGPT subscription** under Restructuring,
+   select a model, and click **Save Settings**. Leave your transcription choice unchanged.
+
+The model picker synchronizes the connected account's entire user-visible model
+catalog after sign-in, account switching, and opening Settings. **Refresh models**
+forces an update; active rewriting refreshes a catalog older than one hour.
+**Automatic** follows the first model in OpenAI's account catalog order. An
+explicitly selected model that disappears is marked unavailable, not silently
+replaced. This lists models available through the integration, which can differ
+from ChatGPT's own model picker.
+
+OAuth credentials are stored separately from API keys in macOS Keychain. The
+subscription route sends transcript text, not audio, to the public Responses API.
+It consumes your existing plan allowance; use **Manage usage** to control app
+limits. If sign-in, quota, or rewriting fails, RedWhisper keeps the original
+transcript and reports a warning. It never falls back to paid API rephrasing.
+**Disconnect** clears local credentials and attempts remote session revocation.
+
+Account linking requires your own browser approval. API transcription remains
+separately billed, and subscription eligibility is determined by OpenAI.
+See [Sign in with ChatGPT](https://developers.openai.com/siwc/quickstart) and
+[supported capabilities](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+
+The optional launch-time browser form can use a previously connected account;
+account linking and switching are managed in the native Settings window.
+
 | Capability | What it means |
 |---|---|
 | **No app subscription** | Install the open-source app and choose whether any provider usage is worth paying for. |

@@ -1,4 +1,5 @@
 import unittest
+import time
 from unittest.mock import patch
 
 import AppKit
@@ -9,6 +10,29 @@ from settings_store import AppSettings
 
 
 class NativeSettingsTests(unittest.TestCase):
+    def setUp(self):
+        # Unit tests never access the user's subscription or launch OAuth.
+        self.run_chatgpt = NativeSettingsController._run_chatgpt
+        patcher = patch.object(NativeSettingsController, "_run_chatgpt")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_background_model_sync_delivers_results_on_main_thread(self):
+        controller = NativeSettingsController.alloc().init()
+        controller.configure(AppSettings(), [], lambda value: None)
+        state = {"connected": True, "active": "test-account", "models": [
+            {"slug": "first", "display_name": "Same name"},
+            {"slug": "second", "display_name": "Same name"},
+        ]}
+        with patch.object(controller.chatgpt, "snapshot", return_value=state), patch.object(controller.chatgpt, "sync_models"):
+            self.run_chatgpt(controller, "refresh")
+            deadline = time.monotonic() + 3
+            while controller._chatgpt_busy and time.monotonic() < deadline:
+                AppKit.NSRunLoop.currentRunLoop().runUntilDate_(AppKit.NSDate.dateWithTimeIntervalSinceNow_(0.01))
+        self.assertFalse(controller._chatgpt_busy)
+        self.assertEqual(controller.chatgpt_model_values, ["", "first", "second"])
+        self.assertEqual(controller.chatgpt_model_popup.numberOfItems(), 3)
+
     @classmethod
     def setUpClass(cls) -> None:
         AppKit.NSApplication.sharedApplication()
@@ -46,6 +70,46 @@ class NativeSettingsTests(unittest.TestCase):
         self.assertTrue(saved[0].post_process_openai)
         self.assertFalse(saved[0].post_process_local)
         self.assertEqual(saved[0].openai_rewrite_model, "gpt-5-nano")
+
+    def test_subscription_model_sync_preserves_transcription_and_selected_model(self):
+        saved = []
+        controller = NativeSettingsController.alloc().init()
+        controller.configure(AppSettings(engine="openai", openai_model="gpt-4o-mini-transcribe", post_process_chatgpt=True, chatgpt_rewrite_model="future-model"), [], saved.append)
+        controller.chatGPTFinished_({"state": {"connected": True, "active": "test-account", "models": [
+            {"slug": "new-model", "display_name": "New Model"},
+            {"slug": "future-model", "display_name": "Future Model"},
+        ]}, "message": ""})
+        with patch("native_settings.openai_key_from_environment", return_value="test-key"):
+            controller.saveSettings_(None)
+        self.assertEqual(saved[0].engine, "openai")
+        self.assertEqual(saved[0].openai_model, "gpt-4o-mini-transcribe")
+        self.assertEqual(saved[0].chatgpt_rewrite_model, "future-model")
+        self.assertTrue(saved[0].post_process_chatgpt)
+        self.assertFalse(saved[0].post_process_openai)
+        self.assertEqual(controller.chatgpt_model_values, ["", "new-model", "future-model"])
+
+    def test_subscription_settings_reject_missing_connection_and_removed_model(self):
+        controller = NativeSettingsController.alloc().init()
+        saved = []
+        controller.configure(AppSettings(post_process_chatgpt=True, chatgpt_rewrite_model="removed"), [], saved.append)
+        with patch.object(NativeSettingsController, "_show_error") as error:
+            controller.saveSettings_(None)
+            self.assertIn("Connect", error.call_args.args[0])
+            controller.chatGPTFinished_({"state": {"connected": True, "models": [{"slug": "available", "display_name": "Available"}]}, "message": ""})
+            controller.saveSettings_(None)
+            self.assertIn("unavailable", error.call_args.args[0])
+        self.assertEqual(saved, [])
+
+    def test_subscription_account_window_and_switch_reset_selection(self):
+        controller = NativeSettingsController.alloc().init()
+        controller.configure(AppSettings(chatgpt_rewrite_model="old-model"), [], lambda value: None)
+        controller.showChatGPTAccount_(None)
+        controller._chatgpt_state = {"active": "old-account"}
+        controller.chatGPTFinished_({"state": {"connected": True, "email": "test@example.com", "active": "new-account", "accounts": [{"id": "new-account", "label": "Test account"}], "models": [{"slug": "new-model", "display_name": "New Model"}]}, "message": ""})
+        self.assertEqual(controller.chatgpt_model_values, ["", "new-model"])
+        self.assertEqual(controller.chatgpt_model_popup.indexOfSelectedItem(), 0)
+        self.assertIn("1 models", controller.chatgpt_status.stringValue())
+        controller.cancelSettings_(None)
 
     def test_transcription_model_selection_sets_provider_and_model(self) -> None:
         saved = []

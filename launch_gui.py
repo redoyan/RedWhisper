@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 import importlib.util
 import secrets
 import subprocess
@@ -29,6 +30,7 @@ from mlx_whisper_core import (
 )
 from hotkey_config import HOTKEY_PRESET_LABELS, HOTKEY_PRESETS
 from audio_devices import InputDevice
+from chatgpt_subscription import ChatGPTSubscription, ChatGPTError
 
 
 LOCAL_MODEL_ESTIMATED_GB = 3.0
@@ -52,6 +54,9 @@ class LaunchSelection:
     openai_rewrite_model: str = DEFAULT_OPENAI_REWRITE_MODEL
     post_process_openrouter: bool = False
     openrouter_model: str = DEFAULT_OPENROUTER_MODEL
+    post_process_chatgpt: bool = False
+    chatgpt_rewrite_model: str = ""
+    chatgpt_models: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,8 @@ def configure_in_browser(
     post_process_openrouter: bool = False,
     openrouter_model: str = DEFAULT_OPENROUTER_MODEL,
     runtime: bool = False,
+    post_process_chatgpt: bool = False,
+    chatgpt_rewrite_model: str = "",
 ) -> LaunchSelection:
     """Open a one-use localhost form and block until settings are submitted."""
 
@@ -111,6 +118,13 @@ def configure_in_browser(
     has_elevenlabs_key = bool(elevenlabs_key_from_environment())
     has_local_llm = importlib.util.find_spec("mlx_lm") is not None
     available_input_devices = input_devices or []
+    chatgpt_models = ()
+    try:
+        subscription = ChatGPTSubscription()
+        if subscription.snapshot()["connected"]:
+            chatgpt_models = tuple(subscription.sync_models())
+    except ChatGPTError:
+        pass  # Native account settings provides connection/error recovery.
     initial = LaunchSelection(
         engine=engine,
         language=language,
@@ -127,10 +141,17 @@ def configure_in_browser(
         openai_rewrite_model=openai_rewrite_model,
         post_process_openrouter=post_process_openrouter,
         openrouter_model=openrouter_model,
+        post_process_chatgpt=post_process_chatgpt,
+        chatgpt_rewrite_model=chatgpt_rewrite_model,
+        chatgpt_models=chatgpt_models,
     )
 
     class SettingsServer(ThreadingHTTPServer):
         selection: LaunchSelection | None = None
+
+        def server_bind(self):
+            TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -241,8 +262,14 @@ def configure_in_browser(
                     )
                     return
             selected_rewrite_engine = form.get("rewrite_engine", ["off"])[0]
-            if selected_rewrite_engine not in {"off", "local", "openai", "openrouter"}:
+            if selected_rewrite_engine not in {"off", "local", "openai", "openrouter", "chatgpt"}:
                 self.send_error(400, "Invalid restructuring engine")
+                return
+            selected_chatgpt_model = form.get("chatgpt_rewrite_model", [chatgpt_rewrite_model])[0]
+            if selected_rewrite_engine == "chatgpt" and (
+                not chatgpt_models or (selected_chatgpt_model and selected_chatgpt_model not in {model["slug"] for model in chatgpt_models})
+            ):
+                self.send_error(400, "Connect ChatGPT and select an available model in the app's native Settings first.")
                 return
             if selected_engine == "elevenlabs" and not has_elevenlabs_key:
                 self._send_html(
@@ -370,6 +397,8 @@ def configure_in_browser(
                 maximum_accuracy="maximum_accuracy" in form,
                 replacements=replacement_value or None,
                 post_process_local=selected_rewrite_engine == "local",
+                post_process_chatgpt=selected_rewrite_engine == "chatgpt",
+                chatgpt_rewrite_model=selected_chatgpt_model,
                 hotkey_preset=selected_hotkey,
                 secondary_hotkey_preset=selected_secondary,
                 microphone_gain=microphone_gain,
@@ -438,7 +467,9 @@ def _settings_page(
     )
     accuracy_checked = "checked" if current.maximum_accuracy else ""
     rewrite_engine = (
-        "openrouter"
+        "chatgpt"
+        if current.post_process_chatgpt
+        else "openrouter"
         if current.post_process_openrouter
         else "openai"
         if current.post_process_openai
@@ -515,6 +546,7 @@ def _settings_page(
             ("local", "Local Llama 3B — free & private"),
             ("openai", "OpenAI API — automatic tone"),
             ("openrouter", "OpenRouter — free models"),
+            ("chatgpt", "ChatGPT subscription — rephrasing only"),
         )
     )
     openai_rewrite_labels = {
@@ -524,6 +556,12 @@ def _settings_page(
         "gpt-5.6-terra": "GPT-5.6 Terra — balanced",
         "gpt-5.6-sol": "GPT-5.6 Sol — maximum quality",
     }
+    chatgpt_options = '<option value="">Automatic — account default</option>' + "".join(
+        f'<option value="{escape(model["slug"], quote=True)}" {"selected" if current.chatgpt_rewrite_model == model["slug"] else ""}>{escape(model["display_name"])}</option>'
+        for model in current.chatgpt_models
+    )
+    if current.chatgpt_rewrite_model and current.chatgpt_rewrite_model not in {model["slug"] for model in current.chatgpt_models}:
+        chatgpt_options += f'<option selected value="{escape(current.chatgpt_rewrite_model, quote=True)}">{escape(current.chatgpt_rewrite_model)} — unavailable</option>'
     openai_rewrite_options = "".join(
         f'<option value="{model}" {"selected" if current.openai_rewrite_model == model else ""}>{escape(openai_rewrite_labels[model])}</option>'
         for model in OPENAI_REWRITE_MODELS
@@ -607,6 +645,10 @@ button {{ appearance:none; border:0; border-radius:12px; background:var(--accent
 <fieldset><legend>Accuracy and rewriting</legend><div class="options">
 <div class="option"><label><input type="checkbox" name="maximum_accuracy" {accuracy_checked}>Maximum local accuracy</label><small>Evaluates five candidates. Similar memory use, higher GPU work and latency. Applies only to local Whisper.</small></div>
 <div class="option"><label for="rewrite-engine">Automatic restructuring</label><select id="rewrite-engine" name="rewrite_engine">{rewrite_engine_options}</select><select name="openai_rewrite_model" aria-label="OpenAI restructuring model">{openai_rewrite_options}</select><input name="openrouter_model" type="text" value="{escape(current.openrouter_model)}" aria-label="OpenRouter restructuring model" placeholder="openrouter/free"><small>Casual by default. Begin a recording with “professional” to use professional prose. OpenAI and OpenRouter send only the transcript. <code>openrouter/free</code> chooses an available free model; a specific free model can end in <code>:free</code>.</small><small class="warning">Local rewriting adds about {LOCAL_LLM_ADDITIONAL_GB:.1f} GB. {escape(llm_warning)}</small></div>
+</div></fieldset>
+<fieldset><legend>ChatGPT subscription rephrasing</legend><div class="fields">
+<label for="chatgpt-model">Account models</label><select id="chatgpt-model" name="chatgpt_rewrite_model">{chatgpt_options}</select>
+<span></span><span>Connect or switch accounts in RedWhisper → Settings → ChatGPT account. Models synchronize from your account. Transcription still uses its selected provider and API billing.</span>
 </div></fieldset>
 <fieldset><legend>Language and terminology</legend><div class="fields">
 <label for="language">Language</label><input id="language" name="language" type="text" value="{escape(current.language)}" placeholder="auto or en">

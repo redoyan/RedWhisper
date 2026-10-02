@@ -52,6 +52,17 @@ class SettingsStoreTests(unittest.TestCase):
     def test_api_key_is_not_part_of_persisted_settings(self) -> None:
         self.assertNotIn("api_key", AppSettings.__dataclass_fields__)
 
+    def test_subscription_round_trip_accepts_new_models_without_api_allowlist(self):
+        settings = AppSettings.from_dict({"engine": "openai", "post_process_chatgpt": True, "chatgpt_rewrite_model": "future-account-model"})
+        with tempfile.TemporaryDirectory() as directory:
+            store = SettingsStore(Path(directory) / "settings.json")
+            store.save(settings)
+            self.assertEqual(store.load(), settings)
+        with self.assertRaises(ValueError):
+            AppSettings(post_process_chatgpt=True, post_process_openai=True).validate()
+        for field in ("access_token", "refresh_token", "id_token"):
+            self.assertNotIn(field, AppSettings.__dataclass_fields__)
+
     def test_all_documented_cloud_transcription_models_are_valid(self) -> None:
         for openai_model in (
             "gpt-transcribe",

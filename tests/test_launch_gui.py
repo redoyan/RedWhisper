@@ -20,6 +20,12 @@ from launch_gui import (
 
 
 class LaunchGUIPageTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("launch_gui.ChatGPTSubscription")
+        self.subscription = patcher.start().return_value
+        self.subscription.snapshot.return_value = {"connected": False}
+        self.addCleanup(patcher.stop)
+
     def test_saved_api_key_is_not_requested_again(self) -> None:
         control = _api_key_control(has_openai_key=True)
         self.assertIn("Saved securely in macOS Keychain", control)

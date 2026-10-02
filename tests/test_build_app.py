@@ -24,6 +24,7 @@ class BuildAppTests(unittest.TestCase):
         self.assertIn("mlx_whisper_core.py", builder)
         self.assertIn("launch_gui.py", builder)
         self.assertIn("native_settings.py", builder)
+        self.assertIn("chatgpt_subscription.py", builder)
         self.assertIn("RedWhisper-icon.png", builder)
         self.assertIn("RedWhisper-menu.png", builder)
         self.assertIn("RedWhisper.icns", builder)
