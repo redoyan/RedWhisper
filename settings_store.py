@@ -36,6 +36,8 @@ class AppSettings:
     post_process_local: bool = False
     post_process_openai: bool = False
     post_process_openrouter: bool = False
+    post_process_chatgpt: bool = False
+    chatgpt_rewrite_model: str = ""
     hotkey_preset: str = "fn"
     secondary_hotkey_preset: str | None = None
     microphone_gain: float = 2.0
@@ -72,6 +74,7 @@ class AppSettings:
                 self.post_process_local,
                 self.post_process_openai,
                 self.post_process_openrouter,
+                self.post_process_chatgpt,
             )
         ):
             raise ValueError("Invalid saved boolean setting")
@@ -80,6 +83,7 @@ class AppSettings:
                 self.post_process_local,
                 self.post_process_openai,
                 self.post_process_openrouter,
+                self.post_process_chatgpt,
             )
         ) > 1:
             raise ValueError("Select only one restructuring engine")
@@ -104,6 +108,8 @@ class AppSettings:
             raise ValueError("Invalid saved ElevenLabs model")
         if self.openai_rewrite_model not in OPENAI_REWRITE_MODELS:
             raise ValueError("Invalid saved OpenAI restructuring model")
+        if not isinstance(self.chatgpt_rewrite_model, str) or len(self.chatgpt_rewrite_model) > 200 or any(c.isspace() for c in self.chatgpt_rewrite_model):
+            raise ValueError("Invalid saved ChatGPT restructuring model")
         validate_openrouter_model(self.openrouter_model)
         if not isinstance(self.openrouter_models, tuple) or len(self.openrouter_models) > 50:
             raise ValueError("Invalid saved OpenRouter model list")

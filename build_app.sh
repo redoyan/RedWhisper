@@ -27,6 +27,7 @@ mv "$RUNTIME/.venv.new" "$RUNTIME/.venv"
 for file in \
     audio_devices.py \
     audio_processing.py \
+    chatgpt_subscription.py \
     hotkey_config.py \
     launch_gui.py \
     mlx_whisper_core.py \

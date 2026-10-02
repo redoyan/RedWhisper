@@ -38,6 +38,7 @@ from audio_devices import (
 )
 from hotkey_config import ActiveHotkeys, HotkeyConfig, PushToTalkLatch
 from settings_store import AppSettings, SettingsStore
+from chatgpt_subscription import ChatGPTTextPostProcessor
 
 from mlx_whisper_core import (
     ConfigurationError,
@@ -78,6 +79,8 @@ SAMPLE_RATE = 16000
 
 
 def restructuring_label(settings: AppSettings) -> str:
+    if settings.post_process_chatgpt:
+        return f"ChatGPT plan · {settings.chatgpt_rewrite_model or 'Automatic'}"
     if settings.post_process_local:
         return "Local Llama 3B"
     if settings.post_process_openai:
@@ -975,6 +978,14 @@ def main():
         help="Enable automatic casual/professional rewriting through OpenRouter",
     )
     parser.add_argument(
+        "--post-process-chatgpt", action=argparse.BooleanOptionalAction,
+        default=None, help="Rewrite using your connected ChatGPT subscription",
+    )
+    parser.add_argument(
+        "--chatgpt-rewrite-model", default=None,
+        help="Account model slug; empty selects the first available account model",
+    )
+    parser.add_argument(
         "--local-llm-model",
         default=DEFAULT_LOCAL_LLM,
         help=f"MLX-LM model used only with --post-process-local (default: {DEFAULT_LOCAL_LLM})",
@@ -1071,6 +1082,10 @@ def main():
         args.post_process_openai = saved_settings.post_process_openai
     if args.post_process_openrouter is None:
         args.post_process_openrouter = saved_settings.post_process_openrouter
+    if args.post_process_chatgpt is None:
+        args.post_process_chatgpt = saved_settings.post_process_chatgpt
+    if args.chatgpt_rewrite_model is None:
+        args.chatgpt_rewrite_model = saved_settings.chatgpt_rewrite_model
     args.hotkey = args.hotkey or saved_settings.hotkey_preset
     args.secondary_hotkey = (
         args.secondary_hotkey or saved_settings.secondary_hotkey_preset
@@ -1097,6 +1112,7 @@ def main():
             args.post_process_local,
             args.post_process_openai,
             args.post_process_openrouter,
+            args.post_process_chatgpt,
         )
     ) > 1:
         parser.error("Select only one restructuring engine")
@@ -1141,6 +1157,8 @@ def main():
             post_process_local=args.post_process_local,
             post_process_openai=args.post_process_openai,
             post_process_openrouter=args.post_process_openrouter,
+            post_process_chatgpt=args.post_process_chatgpt,
+            chatgpt_rewrite_model=args.chatgpt_rewrite_model,
             hotkey_preset=args.hotkey,
             secondary_hotkey_preset=args.secondary_hotkey,
             microphone_gain=args.microphone_gain,
@@ -1158,6 +1176,8 @@ def main():
         args.post_process_local = selection.post_process_local
         args.post_process_openai = selection.post_process_openai
         args.post_process_openrouter = selection.post_process_openrouter
+        args.post_process_chatgpt = selection.post_process_chatgpt
+        args.chatgpt_rewrite_model = selection.chatgpt_rewrite_model
         args.hotkey = selection.hotkey_preset
         args.secondary_hotkey = selection.secondary_hotkey_preset
         args.microphone_gain = selection.microphone_gain
@@ -1180,6 +1200,8 @@ def main():
                     post_process_local=args.post_process_local,
                     post_process_openai=args.post_process_openai,
                     post_process_openrouter=args.post_process_openrouter,
+                    post_process_chatgpt=args.post_process_chatgpt,
+                    chatgpt_rewrite_model=args.chatgpt_rewrite_model,
                     hotkey_preset=args.hotkey,
                     secondary_hotkey_preset=args.secondary_hotkey,
                     microphone_gain=args.microphone_gain,
@@ -1207,6 +1229,8 @@ def main():
         post_process_local=args.post_process_local,
         post_process_openai=args.post_process_openai,
         post_process_openrouter=args.post_process_openrouter,
+        post_process_chatgpt=args.post_process_chatgpt,
+        chatgpt_rewrite_model=args.chatgpt_rewrite_model,
         hotkey_preset=args.hotkey,
         secondary_hotkey_preset=args.secondary_hotkey,
         microphone_gain=args.microphone_gain,
@@ -1266,6 +1290,8 @@ def main():
         if args.post_process_local:
             local_post_processor = LocalLLMPostProcessor(args.local_llm_model)
             post_processor = local_post_processor
+        elif args.post_process_chatgpt:
+            post_processor = ChatGPTTextPostProcessor(args.chatgpt_rewrite_model)
         elif args.post_process_openai:
             post_processor = OpenAITextPostProcessor(
                 OpenAIRewriteOptions(
