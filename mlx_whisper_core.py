@@ -41,12 +41,17 @@ OPENAI_REWRITE_MODELS = (
 )
 DEFAULT_OPENAI_REWRITE_MODEL = OPENAI_REWRITE_MODELS[0]
 OPENAI_KEYCHAIN_SERVICE = "com.mlx-whisper.openai"
+# Early Windows builds saved the OpenAI key under this credential name.
+OPENAI_FALLBACK_KEYCHAIN_SERVICES = ("com.redwhisper.openai",)
 OPENAI_KEYCHAIN_ACCOUNT = "api-key"
 OPENROUTER_KEYCHAIN_SERVICE = "com.redwhisper.openrouter"
 OPENROUTER_KEYCHAIN_ACCOUNT = "api-key"
 ELEVENLABS_KEYCHAIN_SERVICE = "com.redwhisper.elevenlabs"
 ELEVENLABS_KEYCHAIN_ACCOUNT = "api-key"
 DEFAULT_OPENROUTER_MODEL = "openrouter/free"
+OPENROUTER_TRANSCRIPTION_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
+OPENROUTER_TRANSCRIPTION_MODELS = ("openai/whisper-large-v3",)
+DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL = OPENROUTER_TRANSCRIPTION_MODELS[0]
 
 
 class TranscriptionError(RuntimeError):
@@ -227,6 +232,74 @@ class OpenAITranscriber:
 
 
 @dataclass(frozen=True)
+class OpenRouterTranscriptionOptions:
+    api_key: str
+    model: str = DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL
+    language: str | None = None
+    timeout_seconds: float = 120.0
+
+
+class OpenRouterTranscriber:
+    """Speech-to-text through OpenRouter's dedicated transcription endpoint."""
+
+    def __init__(self, options: OpenRouterTranscriptionOptions) -> None:
+        if not options.api_key.strip():
+            raise ConfigurationError(
+                "An OpenRouter API key is required for OpenRouter transcription"
+            )
+        if not options.model.strip() or len(options.model) > 200:
+            raise ConfigurationError("Invalid OpenRouter transcription model")
+        self.options = options
+
+    def transcribe(self, audio_path: Path) -> str:
+        payload: dict[str, object] = {
+            "model": self.options.model,
+            "input_audio": {
+                "data": base64.b64encode(audio_path.read_bytes()).decode("ascii"),
+                "format": audio_path.suffix.lstrip(".").lower() or "wav",
+            },
+            "temperature": 0,
+        }
+        if self.options.language:
+            payload["language"] = self.options.language
+        request = urllib.request.Request(
+            OPENROUTER_TRANSCRIPTION_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.options.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/redoyan/RedWhisper",
+                "X-Title": "RedWhisper",
+            },
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=self.options.timeout_seconds
+            ) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            detail = OpenAITranscriber._api_error_message(error)
+            raise TranscriptionError(
+                f"OpenRouter transcription failed (HTTP {error.code}): {detail}"
+            ) from error
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise TranscriptionError(
+                f"OpenRouter transcription unavailable: {error}"
+            ) from error
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise TranscriptionError(
+                "OpenRouter returned an invalid transcription response"
+            ) from error
+        text = result.get("text")
+        if not isinstance(text, str):
+            raise TranscriptionError(
+                "OpenRouter transcription response did not contain text"
+            )
+        return text.strip()
+
+
+@dataclass(frozen=True)
 class ElevenLabsTranscriptionOptions:
     api_key: str
     model: str = "scribe_v2"
@@ -255,7 +328,9 @@ class ElevenLabsTranscriber:
         boundary = f"----redwhisper-{uuid.uuid4().hex}"
         fields = {
             "model_id": self.options.model,
+            "timestamps_granularity": "none",
             "tag_audio_events": "false",
+            "diarize": "false",
         }
         if self.options.language:
             fields["language_code"] = self._language_code(self.options.language)
@@ -917,17 +992,29 @@ class TranscriptPipeline:
         return warning
 
 
-def _key_from_environment(variable: str, service: str, account: str) -> str:
-    environment_key = os.environ.get(variable, "").strip()
-    if environment_key:
-        return environment_key
+def _key_from_environment(
+    variable: str,
+    service: str,
+    account: str,
+    *,
+    alias_variables: tuple[str, ...] = (),
+    fallback_services: tuple[str, ...] = (),
+) -> str:
+    for name in (variable, *alias_variables):
+        environment_key = os.environ.get(name, "").strip()
+        if environment_key:
+            return environment_key
     try:
         import keyring
         from keyring.errors import KeyringError
     except ImportError:
         return ""
     try:
-        return (keyring.get_password(service, account) or "").strip()
+        for name in (service, *fallback_services):
+            stored_key = (keyring.get_password(name, account) or "").strip()
+            if stored_key:
+                return stored_key
+        return ""
     except KeyringError:
         return ""
 
@@ -945,7 +1032,7 @@ def _save_key(api_key: str, provider: str, service: str, account: str) -> None:
         keyring.set_password(service, account, key)
     except KeyringError as error:
         raise ConfigurationError(
-            f"Could not save the {provider} API key in macOS Keychain: {error}"
+            f"Could not save the {provider} API key in secure credential storage: {error}"
         ) from error
 
 
@@ -954,6 +1041,7 @@ def openai_key_from_environment() -> str:
         "OPENAI_API_KEY",
         OPENAI_KEYCHAIN_SERVICE,
         OPENAI_KEYCHAIN_ACCOUNT,
+        fallback_services=OPENAI_FALLBACK_KEYCHAIN_SERVICES,
     )
 
 
@@ -988,6 +1076,7 @@ def elevenlabs_key_from_environment() -> str:
         "ELEVENLABS_API_KEY",
         ELEVENLABS_KEYCHAIN_SERVICE,
         ELEVENLABS_KEYCHAIN_ACCOUNT,
+        alias_variables=("XI_API_KEY",),
     )
 
 

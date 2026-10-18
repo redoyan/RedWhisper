@@ -18,12 +18,17 @@ from mlx_whisper_core import (
     LocalWhisperOptions,
     LocalLLMPostProcessor,
     MLXWhisperTranscriber,
+    OpenAIRewriteOptions,
+    OpenAITextPostProcessor,
     OpenAITranscriber,
     OpenAITranscriptionOptions,
     OpenAITextPostProcessor,
     OpenAIRewriteOptions,
     OpenRouterTextPostProcessor,
     OpenRouterRewriteOptions,
+    OpenRouterTranscriber,
+    OpenRouterTranscriptionOptions,
+    OPENAI_FALLBACK_KEYCHAIN_SERVICES,
     OPENAI_KEYCHAIN_ACCOUNT,
     OPENAI_KEYCHAIN_SERVICE,
     OPENROUTER_KEYCHAIN_ACCOUNT,
@@ -384,6 +389,221 @@ class OpenAITranscriberTests(unittest.TestCase):
             "secret-key",
         )
         self.assertEqual(loaded, "secret-key")
+
+    def test_legacy_keychain_service_is_still_read(self) -> None:
+        keyring_module = types.ModuleType("keyring")
+        errors_module = types.ModuleType("keyring.errors")
+
+        class FakeKeyringError(Exception):
+            pass
+
+        errors_module.KeyringError = FakeKeyringError
+        keyring_module.get_password = lambda service, _account: (
+            "legacy-key" if service == OPENAI_FALLBACK_KEYCHAIN_SERVICES[0] else None
+        )
+
+        with patch.dict(
+            sys.modules,
+            {"keyring": keyring_module, "keyring.errors": errors_module},
+        ), patch.dict("os.environ", {}, clear=True):
+            loaded = openai_key_from_environment()
+
+        self.assertEqual(loaded, "legacy-key")
+
+
+class AdditionalCloudTranscriberTests(unittest.TestCase):
+    class FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return self.payload
+
+    def test_openrouter_sends_base64_audio_to_stt_endpoint(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return self.FakeResponse(b'{"text":"OpenRouter transcript"}')
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "speech.wav"
+            audio_path.write_bytes(b"RIFF-test-audio")
+            transcriber = OpenRouterTranscriber(
+                OpenRouterTranscriptionOptions(
+                    api_key="router-key",
+                    model="openai/whisper-large-v3",
+                    language="en",
+                )
+            )
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                text = transcriber.transcribe(audio_path)
+
+        payload = json.loads(captured["request"].data)
+        self.assertEqual(text, "OpenRouter transcript")
+        self.assertEqual(
+            captured["request"].full_url,
+            "https://openrouter.ai/api/v1/audio/transcriptions",
+        )
+        self.assertEqual(payload["model"], "openai/whisper-large-v3")
+        self.assertEqual(payload["language"], "en")
+        self.assertEqual(payload["input_audio"]["format"], "wav")
+        self.assertNotIn("router-key", captured["request"].data.decode())
+
+    def test_elevenlabs_sends_multipart_audio_and_scribe_model(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return self.FakeResponse(b'{"text":"ElevenLabs transcript"}')
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "speech.wav"
+            audio_path.write_bytes(b"RIFF-eleven-audio")
+            transcriber = ElevenLabsTranscriber(
+                ElevenLabsTranscriptionOptions(
+                    api_key="eleven-key",
+                    model="scribe_v2",
+                    language="en",
+                )
+            )
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                text = transcriber.transcribe(audio_path)
+
+        body = captured["request"].data
+        self.assertEqual(text, "ElevenLabs transcript")
+        self.assertEqual(
+            captured["request"].full_url,
+            "https://api.elevenlabs.io/v1/speech-to-text",
+        )
+        self.assertIn(b"scribe_v2", body)
+        self.assertIn(b"language_code", body)
+        self.assertIn(b"RIFF-eleven-audio", body)
+        self.assertNotIn(b"eleven-key", body)
+
+    def test_cloud_transcribers_require_provider_keys(self) -> None:
+        with self.assertRaises(ConfigurationError):
+            OpenRouterTranscriber(OpenRouterTranscriptionOptions(api_key=""))
+        with self.assertRaises(ConfigurationError):
+            ElevenLabsTranscriber(ElevenLabsTranscriptionOptions(api_key=""))
+
+
+class CloudRewriteTests(unittest.TestCase):
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self.payload = json.dumps(payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return self.payload
+
+    def test_openai_rewrites_transcript_with_professional_tone(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return self.FakeResponse(
+                {
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "This is the polished transcript.",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+
+        processor = OpenAITextPostProcessor(
+            OpenAIRewriteOptions(api_key="openai-key", model="gpt-5-nano")
+        )
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            rewritten = processor.process("Professional, this is the raw transcript")
+
+        payload = json.loads(captured["request"].data)
+        self.assertEqual(rewritten, "This is the polished transcript.")
+        self.assertEqual(
+            captured["request"].full_url,
+            "https://api.openai.com/v1/responses",
+        )
+        self.assertEqual(payload["model"], "gpt-5-nano")
+        self.assertFalse(payload["store"])
+        self.assertIn("coherent paragraphs", payload["instructions"])
+        self.assertIn("professional written prose", payload["instructions"])
+        self.assertNotIn("Professional", payload["input"])
+        self.assertNotIn("openai-key", captured["request"].data.decode())
+
+    def test_openrouter_rewrites_transcript_through_selected_model(self) -> None:
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return self.FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {"content": "A clearer transcript."},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            )
+
+        processor = OpenRouterTextPostProcessor(
+            OpenRouterRewriteOptions(
+                api_key="router-key",
+                model="openrouter/free",
+            )
+        )
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            rewritten = processor.process("a less clear transcript")
+
+        payload = json.loads(captured["request"].data)
+        self.assertEqual(rewritten, "A clearer transcript.")
+        self.assertEqual(
+            captured["request"].full_url,
+            "https://openrouter.ai/api/v1/chat/completions",
+        )
+        self.assertEqual(payload["model"], "openrouter/free")
+        self.assertIn("coherent paragraphs", payload["messages"][0]["content"])
+        self.assertNotIn("router-key", captured["request"].data.decode())
+
+    def test_cloud_rewriters_require_provider_keys(self) -> None:
+        with self.assertRaises(ConfigurationError):
+            OpenAITextPostProcessor(OpenAIRewriteOptions(api_key=""))
+        with self.assertRaises(ConfigurationError):
+            OpenRouterTextPostProcessor(OpenRouterRewriteOptions(api_key=""))
+
+    def test_reply_like_rewrite_falls_back_to_source_text(self) -> None:
+        processor = OpenAITextPostProcessor(
+            OpenAIRewriteOptions(api_key="openai-key")
+        )
+        source = "Please tell the customer the shipment will arrive on Friday."
+
+        self.assertEqual(
+            processor._safe_rewrite(source, "Certainly! I can help with that."),
+            source,
+        )
 
 
 class ElevenLabsTranscriberTests(unittest.TestCase):

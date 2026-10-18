@@ -6,6 +6,7 @@ from audio_devices import (
     input_devices_from_sounddevice,
     preferred_input_device,
     refresh_input_devices,
+    windows_input_devices,
 )
 
 
@@ -69,6 +70,47 @@ class AudioDeviceTests(unittest.TestCase):
         self.assertEqual(devices[-1].name, "Bose QC Ultra Headphones")
         self.assertEqual(devices[-1].input_channels, 1)
 
+    def test_windows_devices_prefer_wasapi_and_remove_alias_duplicates(self) -> None:
+        raw_devices = (
+            {
+                "name": "Microsoft Sound Mapper - Input",
+                "max_input_channels": 2,
+                "hostapi": 0,
+            },
+            {
+                "name": "Headset (Bose QC Ultra)",
+                "max_input_channels": 1,
+                "hostapi": 0,
+            },
+            {
+                "name": "Headset (Bose QC Ultra)",
+                "max_input_channels": 1,
+                "hostapi": 1,
+            },
+            {
+                "name": "Microphone (Virtual Desktop Audio)",
+                "max_input_channels": 1,
+                "hostapi": 1,
+            },
+        )
+        host_apis = (
+            {
+                "name": "MME",
+                "default_input_device": 0,
+            },
+            {
+                "name": "Windows WASAPI",
+                "default_input_device": 3,
+            },
+        )
+
+        devices = windows_input_devices(
+            input_devices_from_sounddevice(raw_devices, host_apis)
+        )
+
+        self.assertEqual([device.id for device in devices], [2, 3])
+        self.assertTrue(devices[1].is_host_default)
+        self.assertEqual(devices[0].host_api_name, "Windows WASAPI")
 
 if __name__ == "__main__":
     unittest.main()

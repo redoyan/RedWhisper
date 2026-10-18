@@ -1,9 +1,11 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from settings_store import AppSettings, SettingsStore
+from settings_store import AppSettings, SettingsStore, _default_settings_path
 
 
 class SettingsStoreTests(unittest.TestCase):
@@ -39,7 +41,8 @@ class SettingsStoreTests(unittest.TestCase):
                 json.loads(path.read_text(encoding="utf-8"))["openrouter_models"],
                 list(expected.openrouter_models),
             )
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_missing_or_invalid_settings_fall_back_to_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -51,6 +54,48 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_api_key_is_not_part_of_persisted_settings(self) -> None:
         self.assertNotIn("api_key", AppSettings.__dataclass_fields__)
+
+    def test_openrouter_transcription_settings_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            store = SettingsStore(path)
+            expected = AppSettings(
+                engine="openrouter",
+                openrouter_transcription_model="openai/whisper-large-v3",
+            )
+
+            store.save(expected)
+
+            self.assertEqual(store.load(), expected)
+
+    def test_early_windows_openrouter_settings_are_migrated(self) -> None:
+        loaded = AppSettings.from_dict(
+            {
+                "engine": "openrouter",
+                "openrouter_model": "openai/whisper-large-v3",
+                "openrouter_rewrite_model": "meta-llama/llama-3.3-70b-instruct:free",
+                "openrouter_rewrite_models": [
+                    "openrouter/free",
+                    "meta-llama/llama-3.3-70b-instruct:free",
+                ],
+            }
+        )
+
+        self.assertEqual(loaded.openrouter_transcription_model, "openai/whisper-large-v3")
+        self.assertEqual(loaded.openrouter_model, "meta-llama/llama-3.3-70b-instruct:free")
+        self.assertEqual(
+            loaded.openrouter_models,
+            ("openrouter/free", "meta-llama/llama-3.3-70b-instruct:free"),
+        )
+
+    def test_windows_settings_live_in_local_app_data(self) -> None:
+        with patch("settings_store.os.name", "nt"), patch.dict(
+            "os.environ", {"LOCALAPPDATA": "C:/Users/Example/AppData/Local"}
+        ):
+            path = _default_settings_path()
+
+        self.assertEqual(path.parts[-2:], ("RedWhisper", "settings.json"))
+        self.assertIn("Local", path.parts[-3])
 
     def test_primary_and_secondary_shortcuts_must_differ(self) -> None:
         with self.assertRaises(ValueError):

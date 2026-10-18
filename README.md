@@ -5,13 +5,14 @@
 <h1 align="center">Red Whisper</h1>
 
 <p align="center">
-  <strong>Open-source macOS dictation. Bring your own API key—or stay fully local.</strong><br>
+  <strong>Open-source dictation for macOS and Windows. Bring your own API key—or stay fully local.</strong><br>
   Hold your shortcut, speak naturally, and release. Red Whisper transcribes,<br>
   optionally restructures, and inserts your words at the active cursor.
 </p>
 
 <p align="center">
   <img alt="macOS 13 or later" src="https://img.shields.io/badge/macOS-13%2B-111111?logo=apple&logoColor=white">
+  <img alt="Windows 10 or later" src="https://img.shields.io/badge/Windows-10%2B-0078D4?logo=windows&logoColor=white">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple_Silicon-native-C8102E">
   <img alt="Python 3.10 or later" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white">
   <img alt="Local by default" src="https://img.shields.io/badge/privacy-local_by_default-1F7A4D">
@@ -36,6 +37,10 @@ want system-wide voice dictation without giving up control of their audio or
 transcription pipeline. Its default engine runs Whisper Large v3 Turbo locally
 through Apple MLX. OpenAI and ElevenLabs transcription, plus local, OpenAI, and
 OpenRouter restructuring, are available only when explicitly enabled.
+
+> **Windows:** a system-tray edition runs Whisper locally through faster-whisper
+> and adds OpenRouter transcription. Use the packaged installer or follow
+> [README_WINDOWS.md](README_WINDOWS.md). The instructions below describe the macOS app.
 
 ```text
 Hold shortcut  →  Speak  →  Release  →  Transcribe  →  Restructure (optional)  →  Insert
@@ -80,6 +85,7 @@ when available, keep restructuring local, or turn cloud features off entirely.
 | **Native controls** | Configure and quit Red Whisper from its menu-bar ear icon—no browser required. |
 | **Flexible audio input** | Select built-in, USB, virtual, or Bluetooth microphones and tune sensitivity. |
 | **Optional polished prose** | Restructure transcripts locally or through OpenAI/OpenRouter without turning dictation into a chatbot. |
+| **Windows edition** | System-tray app with automatic headset-then-webcam microphone selection. See [README_WINDOWS.md](README_WINDOWS.md). |
 
 ### Highlights
 
@@ -90,6 +96,7 @@ when available, keep restructuring local, or turn cloud features off entirely.
 - Support for single modifier keys, including Fn/Globe, Control, and Option
 - Compact liquid-glass recording island with a subtle live waveform and timer
 - Live microphone discovery, including Bluetooth devices connected after launch
+- Windows: microphone-reactive recording circle and ranked WASAPI microphone detection
 - Selectable microphone sensitivity with safe digital gain
 - Optional best-of-five maximum-accuracy decoding for the local model
 - Deterministic, case-insensitive local term replacement
@@ -140,6 +147,23 @@ one additional provider request per recording.
 Intel Macs are not supported because the local inference path depends on MLX.
 
 ## Install
+
+### Windows
+
+Download and run `RedWhisper-Setup-1.6.2.exe`, or build it from source:
+
+```powershell
+.\build_windows.ps1
+```
+
+See [README_WINDOWS.md](README_WINDOWS.md) for Windows behavior, requirements,
+privacy details, troubleshooting, and build instructions.
+
+Windows can optionally send the completed transcript to a separately selected
+OpenAI or OpenRouter text model for grammar correction and paragraph
+restructuring, independently of the speech-to-text engine.
+
+### macOS
 
 Clone the repository and run the installer:
 

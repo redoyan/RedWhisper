@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from audio_processing import apply_microphone_gain, root_mean_square
+from audio_processing import apply_microphone_gain, resample_audio, root_mean_square
 
 
 class AudioProcessingTests(unittest.TestCase):
@@ -18,6 +18,18 @@ class AudioProcessingTests(unittest.TestCase):
 
     def test_rms_handles_empty_audio(self) -> None:
         self.assertEqual(root_mean_square(np.array([], dtype=np.float32)), 0.0)
+
+    def test_resampling_preserves_duration_and_endpoints(self) -> None:
+        audio = np.linspace(-1.0, 1.0, 48_000, dtype=np.float32)
+        resampled = resample_audio(audio, 48_000, 16_000)
+
+        self.assertEqual(len(resampled), 16_000)
+        self.assertAlmostEqual(float(resampled[0]), -1.0)
+        self.assertAlmostEqual(float(resampled[-1]), 1.0)
+
+    def test_resampling_rejects_invalid_rates(self) -> None:
+        with self.assertRaises(ValueError):
+            resample_audio(np.ones(4, dtype=np.float32), 0, 16_000)
 
 
 if __name__ == "__main__":

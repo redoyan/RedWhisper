@@ -3,7 +3,14 @@
 from dataclasses import dataclass
 
 
-KEY_CODES = {"D": 0x02, "R": 0x0F, "Space": 0x31}
+KEY_CODES = {
+    "D": 0x02,
+    "R": 0x0F,
+    "Space": 0x31,
+    "Right Ctrl": 0x3E,
+    "Right Alt": 0x3D,
+    "F8": 0x64,
+}
 MODIFIER_LABELS = {
     "option": "⌥",
     "control": "⌃",
@@ -93,8 +100,13 @@ class HotkeyConfig:
         if self.preset.startswith(CUSTOM_PREFIX):
             return self._custom_parts()[1]
         modifier = self.modifier
-        if modifier == "command_shift":
-            return ("shift", "command")
+        combined_modifiers = {
+            "command_shift": ("shift", "command"),
+            "control_alt": ("control", "option"),
+            "control_shift": ("control", "shift"),
+        }
+        if modifier in combined_modifiers:
+            return combined_modifiers[modifier]
         return (modifier,) if modifier else ()
 
     @property
@@ -139,15 +151,23 @@ class HotkeyConfig:
 
 HOTKEY_PRESETS: dict[str, tuple[str | None, str | None]] = {
     "fn": (None, None),
+    "right_control": (None, "Right Ctrl"),
+    "right_alt": (None, "Right Alt"),
+    "f8": (None, "F8"),
     "option_d": ("option", "D"),
     "option_space": ("option", "Space"),
     "control_space": ("control", "Space"),
+    "control_alt_space": ("control_alt", "Space"),
+    "control_shift_space": ("control_shift", "Space"),
     "command_r": ("command", "R"),
     "command_shift_space": ("command_shift", "Space"),
 }
 
 HOTKEY_PRESET_LABELS = {
     "fn": "Fn / Globe — single key",
+    "right_control": "Right Ctrl — single key",
+    "right_alt": "Right Alt — single key",
+    "f8": "F8 — single key",
     "option_d": "⌥D — Option + D",
     "option_space": "⌥Space — Option + Space",
     "control_space": "⌃Space — Control + Space",

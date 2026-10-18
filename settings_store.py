@@ -11,6 +11,7 @@ import tempfile
 from hotkey_config import HotkeyConfig
 from mlx_whisper_core import (
     DEFAULT_OPENROUTER_MODEL,
+    DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL,
     DEFAULT_OPENAI_REWRITE_MODEL,
     ELEVENLABS_TRANSCRIPTION_MODELS,
     OPENAI_REWRITE_MODELS,
@@ -19,9 +20,15 @@ from mlx_whisper_core import (
 )
 
 
-DEFAULT_SETTINGS_PATH = (
-    Path.home() / "Library" / "Application Support" / "RedWhisper" / "settings.json"
-)
+def _default_settings_path() -> Path:
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+        return base / "RedWhisper" / "settings.json"
+    return Path.home() / "Library" / "Application Support" / "RedWhisper" / "settings.json"
+
+
+DEFAULT_SETTINGS_PATH = _default_settings_path()
 LEGACY_SETTINGS_PATH = (
     Path.home() / "Library" / "Application Support" / "MLX Whisper" / "settings.json"
 )
@@ -46,9 +53,19 @@ class AppSettings:
     openai_rewrite_model: str = DEFAULT_OPENAI_REWRITE_MODEL
     openrouter_model: str = DEFAULT_OPENROUTER_MODEL
     openrouter_models: tuple[str, ...] = (DEFAULT_OPENROUTER_MODEL,)
+    openrouter_transcription_model: str = DEFAULT_OPENROUTER_TRANSCRIPTION_MODEL
 
     @classmethod
     def from_dict(cls, payload: dict) -> "AppSettings":
+        if "openrouter_rewrite_model" in payload:
+            # Early Windows builds used openrouter_model for transcription and
+            # openrouter_rewrite_model(s) for restructuring.
+            payload = dict(payload)
+            if "openrouter_model" in payload:
+                payload["openrouter_transcription_model"] = payload.pop("openrouter_model")
+            payload["openrouter_model"] = payload.pop("openrouter_rewrite_model")
+            if "openrouter_rewrite_models" in payload:
+                payload["openrouter_models"] = payload.pop("openrouter_rewrite_models")
         values = {
             key: payload[key]
             for key in cls.__dataclass_fields__
@@ -61,7 +78,7 @@ class AppSettings:
         return settings
 
     def validate(self) -> None:
-        if self.engine not in {"local", "openai", "elevenlabs"}:
+        if self.engine not in {"local", "openai", "openrouter", "elevenlabs"}:
             raise ValueError("Invalid saved transcription engine")
         if not isinstance(self.language, str) or not self.language or len(self.language) > 20:
             raise ValueError("Invalid saved language")
@@ -100,6 +117,12 @@ class AppSettings:
             raise ValueError("Invalid saved microphone name")
         if self.openai_model not in OPENAI_TRANSCRIPTION_MODELS:
             raise ValueError("Invalid saved OpenAI model")
+        if (
+            not isinstance(self.openrouter_transcription_model, str)
+            or not self.openrouter_transcription_model.strip()
+            or len(self.openrouter_transcription_model) > 200
+        ):
+            raise ValueError("Invalid saved OpenRouter transcription model")
         if self.elevenlabs_model not in ELEVENLABS_TRANSCRIPTION_MODELS:
             raise ValueError("Invalid saved ElevenLabs model")
         if self.openai_rewrite_model not in OPENAI_REWRITE_MODELS:
