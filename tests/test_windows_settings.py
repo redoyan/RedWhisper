@@ -1,8 +1,10 @@
 import unittest
+from unittest.mock import Mock
 
 from settings_store import AppSettings
 from windows_settings import (
     WINDOWS_HOTKEYS,
+    disable_combobox_mouse_wheel,
     windows_custom_hotkey_value,
     windows_default_settings,
     windows_virtual_key_label,
@@ -10,6 +12,17 @@ from windows_settings import (
 
 
 class WindowsSettingsTests(unittest.TestCase):
+    def test_mouse_wheel_does_not_change_dropdown_values(self) -> None:
+        root = Mock()
+
+        disable_combobox_mouse_wheel(root)
+
+        root.bind_class.assert_called_once()
+        class_name, sequence, handler = root.bind_class.call_args.args
+        self.assertEqual((class_name, sequence), ("TCombobox", "<MouseWheel>"))
+        # None rather than "break", so the settings page still scrolls.
+        self.assertIsNone(handler(Mock(delta=-120)))
+
     def test_untouched_mac_default_becomes_windows_shortcut(self) -> None:
         converted = windows_default_settings(AppSettings())
 

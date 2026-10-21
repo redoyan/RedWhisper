@@ -129,6 +129,16 @@ def windows_default_settings(settings: AppSettings) -> AppSettings:
     return AppSettings(**values)
 
 
+def disable_combobox_mouse_wheel(root) -> None:
+    """Let the wheel scroll the settings page without changing dropdown values.
+
+    Tk's default combobox binding cycles the selection on every wheel tick, so
+    scrolling past the shortcut or microphone silently changed them.
+    """
+    # Returning None (not "break") lets the page-level scroll binding run.
+    root.bind_class("TCombobox", "<MouseWheel>", lambda _event: None)
+
+
 def configure_windows_settings(
     current: AppSettings,
     input_devices: list[InputDevice],
@@ -182,6 +192,7 @@ def configure_windows_settings(
         "<MouseWheel>",
         lambda event: canvas.yview_scroll(int(-event.delta / 120), "units"),
     )
+    disable_combobox_mouse_wheel(root)
     ttk.Label(main, text="RedWhisper", font=("Segoe UI", 20, "bold")).pack(anchor="w")
     ttk.Label(
         main,
