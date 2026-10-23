@@ -80,6 +80,7 @@ function Invoke-PnpUtil([string[]]$Arguments) {
     # Windows PowerShell turns native stderr into errors; keep going instead.
     $ErrorActionPreference = 'Continue'
     $output = & pnputil.exe @Arguments 2>&1 | Out-String
+    $script:PnpUtilExitCode = $LASTEXITCODE
     Write-Log ("pnputil {0} -> exit {1}: {2}" -f ($Arguments -join ' '), $LASTEXITCODE, $output.Trim())
 }
 
@@ -112,9 +113,15 @@ function Invoke-Repair {
         return
     }
     Write-Log ("Failed USB devices: " + (($failed | ForEach-Object { "$($_.Name) [$($_.PNPDeviceID), code $($_.ConfigManagerErrorCode)]" }) -join '; '))
+    # Parent is the USB hub the device hangs off; grandparent is the host
+    # controller. Restarting the controller re-enumerates every port on it,
+    # the closest software equivalent of unplugging the device.
     $parents = @{}
+    $controllers = @{}
     foreach ($device in $failed) {
-        $parents[$device.PNPDeviceID] = Get-ParentDevice $device.PNPDeviceID
+        $parent = Get-ParentDevice $device.PNPDeviceID
+        $parents[$device.PNPDeviceID] = $parent
+        if ($parent) { $controllers[$device.PNPDeviceID] = Get-ParentDevice $parent }
     }
 
     $steps = @(
@@ -126,9 +133,40 @@ function Invoke-Repair {
             param($id)
             $parent = $parents[$id]
             if (-not $parent) { Write-Log "No parent hub found for $id" }
-            elseif ($restartedHubs.Add($parent)) { Invoke-PnpUtil @('/restart-device', $parent) } } }
+            elseif ($restarted.Add($parent)) { Invoke-PnpUtil @('/restart-device', $parent) } } },
+        @{ Name = 'restart USB host controller'; Wait = 15; Action = {
+            param($id)
+            $controller = $controllers[$id]
+            if (-not $controller) { Write-Log "No host controller found for $id" }
+            elseif ($restarted.Add($controller)) { Invoke-PnpUtil @('/restart-device', $controller) } } },
+        # A hung device only recovers when it loses power. Some boards drop
+        # port power while the controller is disabled, so hold it off for a
+        # while. Everything on that controller (often the mouse and keyboard)
+        # disconnects until it is enabled again.
+        @{ Name = 'power-cycle USB host controller'; Wait = 15; Action = {
+            param($id)
+            $controller = $controllers[$id]
+            if (-not $controller -or -not $cycled.Add($controller)) { return }
+            Invoke-PnpUtil @('/disable-device', $controller)
+            if ($script:PnpUtilExitCode -ne 0) {
+                # -536870351 (ERROR_NOT_DISABLEABLE): Windows keeps controllers
+                # that carry boot devices enabled, so their ports keep power.
+                Write-Log "Windows will not disable this controller; its ports cannot be power-cycled from software."
+                return
+            }
+            try {
+                Start-Sleep -Seconds 15
+            } finally {
+                foreach ($attempt in 1..3) {
+                    Invoke-PnpUtil @('/enable-device', $controller)
+                    $state = Get-CimInstance Win32_PnPEntity -Filter "PNPDeviceID = '$($controller -replace '\\', '\\')'"
+                    if ($state -and $state.ConfigManagerErrorCode -ne 22) { break }
+                    Start-Sleep -Seconds 3
+                }
+            } } }
     )
-    $restartedHubs = [System.Collections.Generic.HashSet[string]]::new()
+    $restarted = [System.Collections.Generic.HashSet[string]]::new()
+    $cycled = [System.Collections.Generic.HashSet[string]]::new()
     foreach ($step in $steps) {
         Write-Log "Trying: $($step.Name)"
         foreach ($device in $failed) {
@@ -244,7 +282,16 @@ if ($Check) {
         $failed | ForEach-Object { Write-Output "$($_.Name) [$($_.PNPDeviceID), code $($_.ConfigManagerErrorCode)]" }
     }
 } elseif ($Install) {
-    Install-Recovery
+    # The elevated window may be closed before anyone reads it, so also
+    # record the outcome where the signed-in user can find it.
+    $resultPath = Join-Path $env:TEMP 'RedWhisperUsbRecovery-install.txt'
+    try {
+        Install-Recovery
+        Set-Content -Path $resultPath -Value "OK $(Get-Date -Format o)" -Encoding utf8
+    } catch {
+        Set-Content -Path $resultPath -Value "FAILED $(Get-Date -Format o)`r`n$($_ | Out-String)" -Encoding utf8
+        throw
+    }
 } elseif ($Uninstall) {
     Uninstall-Recovery
 } else {
