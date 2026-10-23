@@ -43,6 +43,11 @@ $RunHistoryPath = Join-Path $InstallDir 'recent-runs.txt'
 $RecoverableProblemCodes = @(10, 43)
 $MaxRunsPerWindow = 3
 $RunWindow = [TimeSpan]::FromMinutes(10)
+# A pass that fails leaves the device failed, which Windows logs, which
+# re-triggers this task. Leave the same device alone for a while rather
+# than restarting hubs (and the mouse on them) again and again.
+$LastFailurePath = Join-Path $InstallDir 'last-failure.txt'
+$FailureCooldown = [TimeSpan]::FromMinutes(5)
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -112,6 +117,16 @@ function Invoke-Repair {
         Write-Log "Skipped: already ran $MaxRunsPerWindow times in the last $($RunWindow.TotalMinutes) minutes."
         return
     }
+    $signature = ($failed | ForEach-Object { $_.PNPDeviceID } | Sort-Object) -join ';'
+    if (Test-Path $LastFailurePath) {
+        $previous = @(Get-Content $LastFailurePath)
+        $stamp = [datetime]::MinValue
+        if ($previous.Count -ge 2 -and [datetime]::TryParse($previous[0], [ref]$stamp) -and
+            $previous[1] -eq $signature -and ((Get-Date) - $stamp) -lt $FailureCooldown) {
+            Write-Log "Skipped: the same device failed a repair pass $([int]((Get-Date) - $stamp).TotalSeconds) s ago. Unplug it and plug it back in."
+            return
+        }
+    }
     Write-Log ("Failed USB devices: " + (($failed | ForEach-Object { "$($_.Name) [$($_.PNPDeviceID), code $($_.ConfigManagerErrorCode)]" }) -join '; '))
     # Parent is the USB hub the device hangs off; grandparent is the host
     # controller. Restarting the controller re-enumerates every port on it,
@@ -175,10 +190,12 @@ function Invoke-Repair {
         Start-Sleep -Seconds $step.Wait
         $failed = Get-FailedUsbDevices
         if ($failed.Count -eq 0) {
-            Write-Log "Recovered after: $($step.Name)"
+            Write-Log "No failed USB devices remain after: $($step.Name)"
+            Remove-Item $LastFailurePath -ErrorAction SilentlyContinue
             return
         }
     }
+    Set-Content -Path $LastFailurePath -Value @((Get-Date).ToString('o'), $signature) -Encoding utf8
     Write-Log ("Still failing: " + (($failed | ForEach-Object { $_.Name }) -join '; ') +
         ". Unplug the device and connect it to another USB port.")
 }

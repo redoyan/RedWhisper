@@ -6,7 +6,7 @@ result at the active cursor.
 
 ## Install
 
-Run `RedWhisper-Setup-1.6.2.exe`. The installer:
+Run `RedWhisper-Setup-1.6.1.exe`. The installer:
 
 - installs the app for the current user by default;
 - adds a Start menu shortcut;
@@ -159,6 +159,21 @@ finds no usable microphone. Repairs are logged in
 `%ProgramData%\RedWhisperUsbRecovery\usb-recovery.log`. Use `-Check` to list
 failed devices and `-Uninstall` to remove the task.
 
+The task restarts the device, its hub, and its USB controller. That fixes
+devices Windows merely failed to enumerate. If the log still says
+**Still failing**, the webcam's own firmware has hung and only losing power
+resets it; Windows cannot switch USB port power off, so no software can do that
+for you. Fixes that remove the hang, from cheapest to most certain:
+
+- Move the webcam to a port on the chipset USB controller rather than the
+  CPU's. Both ports that failed on the test PC were on the CPU controller.
+- Enable **ErP Ready** (Advanced > APM Configuration) in an ASUS BIOS, or the
+  equivalent "USB power off in S5" option elsewhere, so the webcam is fully
+  powered off whenever the PC is, and every start is a clean power cycle.
+- Check the webcam maker's support site for a firmware update.
+- Put the webcam on a desktop USB hub with per-port power switches, so a
+  hung webcam is reset with a switch at the desk instead of a replug.
+
 ### Local model loading fails
 
 Open the diagnostic log from the tray menu. Check network access and free disk
@@ -181,7 +196,7 @@ The build script:
 4. runs the cross-platform and Windows tests;
 5. builds a no-console application with PyInstaller;
 6. installs Inno Setup through `winget` if necessary;
-7. creates `dist\RedWhisper-Setup-1.6.2.exe`.
+7. creates `dist\RedWhisper-Setup-1.6.1.exe`.
 
 Useful development variants:
 
