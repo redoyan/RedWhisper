@@ -169,7 +169,7 @@ function Install-Recovery {
     $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$InstalledScript&quot;"
     $taskXml = @"
 <?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit">
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>RedWhisper</Author>
     <Description>Resets USB devices (such as a webcam microphone) that Windows failed to start. Installed by windows_usb_recovery.ps1.</Description>
