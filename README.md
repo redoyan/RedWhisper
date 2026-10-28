@@ -559,6 +559,10 @@ Confirm that **RedWhisper** is enabled in **System Settings → Privacy & Securi
 → Accessibility**. Remove stale entries for older builds if macOS shows more
 than one.
 
+After `./build_app.sh` rebuilds the launcher, macOS can keep showing RedWhisper
+as enabled while ignoring the old grant; remove it from the list and allow it
+again.
+
 ### The microphone is missing
 
 Open Settings after connecting the device and wait briefly for the input list

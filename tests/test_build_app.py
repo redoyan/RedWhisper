@@ -34,6 +34,18 @@ class BuildAppTests(unittest.TestCase):
         self.assertIn("-framework AVFoundation", builder)
         self.assertIn("-framework ApplicationServices", builder)
 
+    def test_builder_recompiles_launcher_only_when_it_changes(self) -> None:
+        builder = (ROOT / "build_app.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            '"${LAUNCHER_FLAGS[@]}"; cat "$ROOT/redwhisper_launcher.m"', builder
+        )
+        self.assertEqual(builder.count("xcrun clang"), 1)
+        guard = builder.index('!= "$launcher_hash" ]]; then')
+        compile_step = builder.index('xcrun clang "${LAUNCHER_FLAGS[@]}"')
+        self.assertLess(guard, compile_step)
+        self.assertLess(compile_step, builder.index("\nfi\n", guard))
+
 
 if __name__ == "__main__":
     unittest.main()
