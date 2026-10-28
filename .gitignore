@@ -17,6 +17,7 @@ build/
 start.sh
 RedWhisper.app/Contents/Resources/runtime/
 RedWhisper.app/Contents/MacOS/RedWhisperLauncher
+RedWhisper.app/Contents/Resources/RedWhisperLauncher.stamp
 
 # Local secrets and machine-specific settings
 .env
