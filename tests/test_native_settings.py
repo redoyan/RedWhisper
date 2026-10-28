@@ -108,7 +108,7 @@ class NativeSettingsTests(unittest.TestCase):
         controller.chatGPTFinished_({"state": {"connected": True, "email": "test@example.com", "active": "new-account", "accounts": [{"id": "new-account", "label": "Test account"}], "models": [{"slug": "new-model", "display_name": "New Model"}]}, "message": ""})
         self.assertEqual(controller.chatgpt_model_values, ["", "new-model"])
         self.assertEqual(controller.chatgpt_model_popup.indexOfSelectedItem(), 0)
-        self.assertIn("1 models", controller.chatgpt_status.stringValue())
+        self.assertIn("1 model available", controller.chatgpt_status.stringValue())
         controller.cancelSettings_(None)
 
     def test_transcription_model_selection_sets_provider_and_model(self) -> None:

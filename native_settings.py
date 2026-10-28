@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 import threading
 import webbrowser
-from pathlib import Path
 from typing import Callable
 
 import AppKit
@@ -68,6 +67,101 @@ OPENAI_REWRITE_MODEL_LABELS = [
 ]
 GAIN_VALUES = [1.0, 2.0, 4.0, 8.0]
 GAIN_LABELS = ["Standard — 1×", "Sensitive — 2×", "High — 4×", "Very high — 8×"]
+REWRITE_ENGINE_SYMBOLS = {
+    "off": "slash.circle",
+    "local": "laptopcomputer",
+    "openai": "cloud",
+    "openrouter": "cloud",
+    "chatgpt": "cloud",
+}
+REWRITE_HELP = {
+    "off": "Transcripts are inserted exactly as they were recognized.",
+    "local": "Rewrites on this Mac with Llama 3.2 3B: free and private.",
+    "openai": "Sends transcript text, never audio, to OpenAI. Billed to your API key.",
+    "openrouter": "Sends transcript text to OpenRouter. Free-model availability varies.",
+    "chatgpt": "Sends transcript text to ChatGPT using your plan allowance, with no API charges.",
+}
+PROFESSIONAL_TIP = "Start a dictation with “professional” for a more formal tone."
+SHORTCUT_HELP = "Hold a shortcut to dictate, then release to insert. Click a shortcut to change it."
+SETTINGS_PANES = (
+    ("general", "General", "gearshape"),
+    ("transcription", "Transcription", "waveform"),
+    ("rephrasing", "Rephrasing", "wand.and.stars"),
+    ("keys", "API Keys", "key"),
+)
+
+WINDOW_WIDTH = 640.0
+PANE_INSET = 24.0
+GROUP_WIDTH = WINDOW_WIDTH - 2 * PANE_INSET
+GROUP_CORNER_RADIUS = 10.0
+SECTION_SPACING = 22.0
+ROW_HEIGHT = 40.0
+ROW_PADDING = 14.0
+ROW_SPACING = 12.0
+ROW_INNER_WIDTH = GROUP_WIDTH - 2 * ROW_PADDING
+CONTROL_WIDTH = 340.0
+SHORTCUT_BUTTON_WIDTH = 240.0
+KEY_FIELD_WIDTH = 260.0
+LANGUAGE_FIELD_WIDTH = 120.0
+REPLACEMENTS_FIELD_WIDTH = 210.0
+ACCOUNT_POPUP_WIDTH = 240.0
+ACTION_BAR_HEIGHT = 60.0
+
+
+def _symbol(name: str, description: str | None = None):
+    return AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+        name, description
+    )
+
+
+class SettingsGroupView(AppKit.NSStackView):
+    """A rounded settings group that draws separators between its visible rows."""
+
+    def drawRect_(self, _dirty_rect) -> None:
+        bounds = self.bounds()
+        dark = (
+            self.effectiveAppearance().bestMatchFromAppearancesWithNames_(
+                [AppKit.NSAppearanceNameAqua, AppKit.NSAppearanceNameDarkAqua]
+            )
+            == AppKit.NSAppearanceNameDarkAqua
+        )
+        window = self.window()
+        hairline = 1.0 / (window.backingScaleFactor() if window else 2.0)
+        outline = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            AppKit.NSInsetRect(bounds, hairline / 2, hairline / 2),
+            GROUP_CORNER_RADIUS,
+            GROUP_CORNER_RADIUS,
+        )
+        AppKit.NSColor.colorWithWhite_alpha_(1.0, 0.055 if dark else 0.85).setFill()
+        outline.fill()
+        AppKit.NSColor.colorWithWhite_alpha_(
+            1.0 if dark else 0.0, 0.09 if dark else 0.07
+        ).setStroke()
+        outline.setLineWidth_(hairline)
+        outline.stroke()
+
+        rows = sorted(
+            (view.frame() for view in self.arrangedSubviews() if not view.isHidden()),
+            key=lambda frame: frame.origin.y,
+        )
+        AppKit.NSColor.separatorColor().setFill()
+        for lower, upper in zip(rows, rows[1:]):
+            boundary = (lower.origin.y + lower.size.height + upper.origin.y) / 2
+            AppKit.NSBezierPath.fillRect_(
+                AppKit.NSMakeRect(
+                    ROW_PADDING,
+                    boundary - hairline / 2,
+                    bounds.size.width - 2 * ROW_PADDING,
+                    hairline,
+                )
+            )
+
+    def layout(self) -> None:
+        objc.super(SettingsGroupView, self).layout()
+        self.setNeedsDisplay_(True)
+
+    def viewDidChangeEffectiveAppearance(self) -> None:
+        self.setNeedsDisplay_(True)
 
 
 def _selected_value(popup, values):
@@ -114,14 +208,13 @@ class NativeSettingsController(AppKit.NSObject):
         self._chatgpt_busy = False
         self._chatgpt_cancel = threading.Event()
         self._chatgpt_state = {}
+        self._chatgpt_operation = ""
         self.chatgpt_model_values = [""]
-        self.chatgpt_account_window = None
         self._build_window()
 
     @objc.python_method
     def _build_window(self) -> None:
-        width, height = 700, 800
-        rect = AppKit.NSMakeRect(0, 0, width, height)
+        rect = AppKit.NSMakeRect(0, 0, WINDOW_WIDTH, 480)
         style = (
             AppKit.NSWindowStyleMaskTitled
             | AppKit.NSWindowStyleMaskClosable
@@ -133,45 +226,81 @@ class NativeSettingsController(AppKit.NSObject):
         self.window.setTitle_("Red Whisper")
         self.window.setReleasedWhenClosed_(False)
         self.window.setDelegate_(self)
-        self.window.center()
-        content = AppKit.NSVisualEffectView.alloc().initWithFrame_(rect)
-        content.setMaterial_(AppKit.NSVisualEffectMaterialUnderWindowBackground)
-        content.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
-        content.setState_(AppKit.NSVisualEffectStateActive)
-        self.window.setContentView_(content)
+        self.window.setContentView_(AppKit.NSView.alloc().initWithFrame_(rect))
 
-        content.addSubview_(self._panel(24, 492, 652, 174))
-        content.addSubview_(self._panel(24, 318, 652, 128))
-        content.addSubview_(self._panel(24, 137, 652, 136))
-        content.addSubview_(self._panel(24, 54, 652, 72))
+        self._saved_keys = {
+            "openai": bool(openai_key_from_environment()),
+            "openrouter": bool(openrouter_key_from_environment()),
+            "elevenlabs": bool(elevenlabs_key_from_environment()),
+        }
+        self._current_pane = None
+        self._panes = {
+            "general": self._build_general_pane(),
+            "transcription": self._build_transcription_pane(),
+            "rephrasing": self._build_rephrasing_pane(),
+            "keys": self._build_keys_pane(),
+        }
+        self._build_action_bar()
 
-        icon_path = self._brand_icon_path()
-        if icon_path:
-            icon = AppKit.NSImage.alloc().initWithContentsOfFile_(str(icon_path))
-            icon_view = AppKit.NSImageView.alloc().initWithFrame_(
-                AppKit.NSMakeRect(30, 718, 52, 52)
-            )
-            icon_view.setImage_(icon)
-            icon_view.setImageScaling_(AppKit.NSImageScaleProportionallyUpOrDown)
-            content.addSubview_(icon_view)
-
-        title = self._text("Settings", 94, 742, 560, 30, 23, bold=True)
-        subtitle = self._text(
-            "Configure transcription, shortcuts, and audio input.",
-            94,
-            718,
-            560,
-            20,
-            13,
-            color=AppKit.NSColor.secondaryLabelColor(),
+        self._toolbar = AppKit.NSToolbar.alloc().initWithIdentifier_(
+            "RedWhisperSettings"
         )
-        content.addSubview_(title)
-        content.addSubview_(subtitle)
-        content.addSubview_(self._section_title("Transcription", 28, 679))
-        content.addSubview_(self._section_title("Keyboard Shortcuts", 28, 459))
-        content.addSubview_(self._section_title("Audio", 28, 286))
-        content.addSubview_(self._section_title("Enhancements", 28, 128))
+        self._toolbar.setDelegate_(self)
+        self._toolbar.setAllowsUserCustomization_(False)
+        self._toolbar.setDisplayMode_(AppKit.NSToolbarDisplayModeIconAndLabel)
+        self.window.setToolbar_(self._toolbar)
+        self.window.setToolbarStyle_(AppKit.NSWindowToolbarStylePreference)
 
+        self.transcriptionModelChanged_(None)
+        self.rewriteEngineChanged_(None)
+        self._update_chatgpt_controls()
+        self._select_pane("general", animate=False)
+        self.window.center()
+
+    @objc.python_method
+    def _build_general_pane(self):
+        self.primary_shortcut_value = self.settings.hotkey_preset
+        self.secondary_shortcut_value = self.settings.secondary_hotkey_preset
+        self._shortcut_monitor = None
+        self._capturing_shortcut = None
+        self._pending_modifier = None
+        self.primary_shortcut_button = self._shortcut_button("capturePrimary:")
+        self.secondary_shortcut_button = self._shortcut_button("captureSecondary:")
+        self.shortcut_help = self._footer(SHORTCUT_HELP)
+        self._refresh_shortcut_buttons()
+        shortcuts = self._section(
+            "Shortcuts",
+            [
+                self._row("Primary shortcut", self.primary_shortcut_button),
+                self._row(
+                    "Secondary shortcut",
+                    self.secondary_shortcut_button,
+                    subtitle="Optional, e.g. for an external keyboard",
+                ),
+            ],
+            self.shortcut_help,
+        )
+
+        self.device_values = []
+        self.device_popup = self._popup(["Searching for microphones…"])
+        self.device_popup.setTarget_(self)
+        self.device_popup.setAction_("microphoneChanged:")
+        self.device_help = self._footer("")
+        self._replace_input_devices(self.input_devices)
+        self.gain_popup = self._popup(GAIN_LABELS)
+        _select_value(self.gain_popup, GAIN_VALUES, self.settings.microphone_gain)
+        microphone = self._section(
+            "Microphone",
+            [
+                self._row("Input device", self.device_popup),
+                self._row("Sensitivity", self.gain_popup),
+            ],
+            self.device_help,
+        )
+        return self._pane([shortcuts, microphone])
+
+    @objc.python_method
+    def _build_transcription_pane(self):
         selected_transcription_model = (
             (self.settings.engine, self.settings.openai_model)
             if self.settings.engine == "openai"
@@ -179,120 +308,66 @@ class NativeSettingsController(AppKit.NSObject):
             if self.settings.engine == "elevenlabs"
             else ("local", None)
         )
-        self.transcription_model_popup = self._popup(
-            235, 625, 420, TRANSCRIPTION_MODEL_LABELS
-        )
+        self.transcription_model_popup = self._popup(TRANSCRIPTION_MODEL_LABELS)
+        for item, (engine, _model) in zip(
+            self.transcription_model_popup.itemArray(), TRANSCRIPTION_MODEL_VALUES
+        ):
+            item.setImage_(_symbol("laptopcomputer" if engine == "local" else "cloud"))
         _select_value(
             self.transcription_model_popup,
             TRANSCRIPTION_MODEL_VALUES,
             selected_transcription_model,
         )
-        self._add_row(
-            content, "Transcription model", self.transcription_model_popup, 625
+        self.transcription_model_popup.setTarget_(self)
+        self.transcription_model_popup.setAction_("transcriptionModelChanged:")
+        self.language_field = self._field(self.settings.language, LANGUAGE_FIELD_WIDTH)
+        self.language_field.setPlaceholderString_("auto")
+        self.transcription_help = self._footer("")
+        engine = self._section(
+            "Engine",
+            [
+                self._row("Model", self.transcription_model_popup),
+                self._row(
+                    "Language",
+                    self.language_field,
+                    subtitle="A code such as “en”, or “auto” to detect it",
+                ),
+            ],
+            self.transcription_help,
         )
 
-        self.language_field = self._field(235, 584, 420, self.settings.language)
-        self._add_row(content, "Language", self.language_field, 584)
-
-        self.api_key_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
-            AppKit.NSMakeRect(235, 543, 133, 26)
-        )
-        key_placeholder = (
-            "OpenAI saved"
-            if openai_key_from_environment()
-            else "OpenAI API key"
-        )
-        self.api_key_field.setPlaceholderString_(key_placeholder)
-        self._add_row(content, "API keys", self.api_key_field, 543)
-
-        self.openrouter_key_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
-            AppKit.NSMakeRect(374, 543, 133, 26)
-        )
-        openrouter_placeholder = (
-            "OpenRouter saved"
-            if openrouter_key_from_environment()
-            else "OpenRouter API key"
-        )
-        self.openrouter_key_field.setPlaceholderString_(openrouter_placeholder)
-        content.addSubview_(self.openrouter_key_field)
-
-        self.elevenlabs_key_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
-            AppKit.NSMakeRect(513, 543, 142, 26)
-        )
-        elevenlabs_placeholder = (
-            "ElevenLabs saved"
-            if elevenlabs_key_from_environment()
-            else "ElevenLabs API key"
-        )
-        self.elevenlabs_key_field.setPlaceholderString_(elevenlabs_placeholder)
-        content.addSubview_(self.elevenlabs_key_field)
-
-        self.primary_shortcut_value = self.settings.hotkey_preset
-        self.secondary_shortcut_value = self.settings.secondary_hotkey_preset
-        self._shortcut_monitor = None
-        self._capturing_shortcut = None
-        self._pending_modifier = None
-        self.primary_shortcut_button = self._shortcut_button(
-            235, 401, "capturePrimary:"
-        )
-        self.secondary_shortcut_button = self._shortcut_button(
-            235, 360, "captureSecondary:"
-        )
-        self.shortcut_help = self._text(
-            "Click a shortcut field, then press the key or combination you want.",
-            235,
-            331,
-            420,
-            18,
-            11,
-            color=AppKit.NSColor.secondaryLabelColor(),
-        )
-        self._refresh_shortcut_buttons()
-        self._add_row(
-            content, "Primary", self.primary_shortcut_button, 401
-        )
-        self._add_row(
-            content, "Secondary", self.secondary_shortcut_button, 360
-        )
-        content.addSubview_(self.shortcut_help)
-
-        self.device_values = []
-        self.device_popup = self._popup(235, 232, 420, ["Searching for microphones…"])
-        self.device_popup.setTarget_(self)
-        self.device_popup.setAction_("microphoneChanged:")
-        self._add_row(content, "Microphone", self.device_popup, 232)
-        self.device_help = self._text(
-            "Bluetooth headset microphones appear here automatically.",
-            235,
-            215,
-            420,
-            16,
-            10,
-            color=AppKit.NSColor.secondaryLabelColor(),
-        )
-        content.addSubview_(self.device_help)
-        self._replace_input_devices(self.input_devices)
-
-        self.gain_popup = self._popup(235, 181, 420, GAIN_LABELS)
-        _select_value(self.gain_popup, GAIN_VALUES, self.settings.microphone_gain)
-        self._add_row(content, "Sensitivity", self.gain_popup, 181)
-
-        self.replacements_field = self._field(
-            235, 146, 420, self.settings.replacements or ""
-        )
-        self.replacements_field.setPlaceholderString_("Optional replacements.json path")
-        self._add_row(content, "Replacement file", self.replacements_field, 146)
-
-        self.maximum_accuracy = self._checkbox(
-            "Maximum local accuracy", 44, 94
-        )
+        self.maximum_accuracy = AppKit.NSSwitch.alloc().init()
         self.maximum_accuracy.setState_(
             AppKit.NSControlStateValueOn
             if self.settings.maximum_accuracy
             else AppKit.NSControlStateValueOff
         )
-        content.addSubview_(self.maximum_accuracy)
+        self.replacements_field = self._field(
+            self.settings.replacements or "", REPLACEMENTS_FIELD_WIDTH
+        )
+        self.replacements_field.setPlaceholderString_("replacements.json")
+        choose = AppKit.NSButton.buttonWithTitle_target_action_(
+            "Choose…", self, "chooseReplacements:"
+        )
+        accuracy = self._section(
+            "Accuracy",
+            [
+                self._row(
+                    "Maximum local accuracy",
+                    self.maximum_accuracy,
+                    subtitle="Best of five decodings. Slower; local model only.",
+                ),
+                self._row(
+                    "Replacement file",
+                    self._stack([self.replacements_field, choose], vertical=False, spacing=8),
+                    subtitle="Fix names and jargon after transcription",
+                ),
+            ],
+        )
+        return self._pane([engine, accuracy])
 
+    @objc.python_method
+    def _build_rephrasing_pane(self):
         rewrite_engine = (
             "chatgpt"
             if self.settings.post_process_chatgpt
@@ -302,30 +377,30 @@ class NativeSettingsController(AppKit.NSObject):
             if self.settings.post_process_openai
             else "local" if self.settings.post_process_local else "off"
         )
-        self.rewrite_engine_popup = self._popup(
-            235, 61, 205, REWRITE_ENGINE_LABELS
-        )
+        self.rewrite_engine_popup = self._popup(REWRITE_ENGINE_LABELS)
+        self.rewrite_engine_popup.setAutoenablesItems_(False)
+        for item, value in zip(
+            self.rewrite_engine_popup.itemArray(), REWRITE_ENGINE_VALUES
+        ):
+            item.setImage_(_symbol(REWRITE_ENGINE_SYMBOLS[value]))
         _select_value(
             self.rewrite_engine_popup,
             REWRITE_ENGINE_VALUES,
             rewrite_engine,
         )
         if importlib.util.find_spec("mlx_lm") is None:
-            self.rewrite_engine_popup.itemAtIndex_(1).setEnabled_(False)
+            local_item = self.rewrite_engine_popup.itemAtIndex_(1)
+            local_item.setEnabled_(False)
+            local_item.setToolTip_("Install with ./install.sh --with-local-llm")
         self.rewrite_engine_popup.setTarget_(self)
         self.rewrite_engine_popup.setAction_("rewriteEngineChanged:")
-        self._add_row(content, "Restructuring", self.rewrite_engine_popup, 61)
 
-        self.openai_rewrite_model_popup = self._popup(
-            446, 61, 209, OPENAI_REWRITE_MODEL_LABELS
-        )
+        self.openai_rewrite_model_popup = self._popup(OPENAI_REWRITE_MODEL_LABELS)
         _select_value(
             self.openai_rewrite_model_popup,
             OPENAI_REWRITE_MODEL_VALUES,
             self.settings.openai_rewrite_model,
         )
-        content.addSubview_(self.openai_rewrite_model_popup)
-
         remembered_openrouter_models = list(
             dict.fromkeys(
                 (
@@ -336,172 +411,488 @@ class NativeSettingsController(AppKit.NSObject):
             )
         )
         self.openrouter_model_field = self._combo_box(
-            446,
-            61,
-            209,
             remembered_openrouter_models,
             self.settings.openrouter_model,
         )
         self.openrouter_model_field.setPlaceholderString_("openrouter/free")
-        content.addSubview_(self.openrouter_model_field)
-        self.chatgpt_model_popup = self._popup(446, 61, 209, ["Automatic — account default"])
+        self.chatgpt_model_popup = self._popup(["Automatic — account default"])
         if self.settings.chatgpt_rewrite_model:
             self.chatgpt_model_values.append(self.settings.chatgpt_rewrite_model)
             self.chatgpt_model_popup.addItemWithTitle_(self.settings.chatgpt_rewrite_model + " — sync needed")
             self.chatgpt_model_popup.selectItemAtIndex_(1)
-        content.addSubview_(self.chatgpt_model_popup)
-        account = AppKit.NSButton.buttonWithTitle_target_action_("ChatGPT account…", self, "showChatGPTAccount:")
-        account.setFrame_(AppKit.NSMakeRect(24, 11, 180, 32))
-        content.addSubview_(account)
-        self.rewriteEngineChanged_(None)
-
-        cancel = AppKit.NSButton.buttonWithTitle_target_action_(
-            "Cancel", self, "cancelSettings:"
-        )
-        cancel.setFrame_(AppKit.NSMakeRect(470, 11, 90, 32))
-        content.addSubview_(cancel)
-
-        save = AppKit.NSButton.buttonWithTitle_target_action_(
-            "Save Settings", self, "saveSettings:"
-        )
-        save.setFrame_(AppKit.NSMakeRect(566, 11, 110, 32))
-        save.setKeyEquivalent_("\r")
-        content.addSubview_(save)
-
-    @staticmethod
-    @objc.python_method
-    def _brand_icon_path() -> Path | None:
-        source = Path(__file__).resolve()
-        candidates = (
-            source.parent.parent / "RedWhisper-icon.png",
-            source.parent / "assets" / "RedWhisper-icon.png",
-        )
-        return next((path for path in candidates if path.exists()), None)
-
-    @classmethod
-    @objc.python_method
-    def _panel(cls, x: float, y: float, width: float, height: float):
-        panel = AppKit.NSBox.alloc().initWithFrame_(
-            AppKit.NSMakeRect(x, y, width, height)
-        )
-        panel.setBoxType_(AppKit.NSBoxCustom)
-        panel.setFillColor_(AppKit.NSColor.controlBackgroundColor())
-        panel.setBorderColor_(AppKit.NSColor.separatorColor())
-        panel.setBorderWidth_(0.5)
-        panel.setCornerRadius_(12.0)
-        return panel
-
-    @classmethod
-    @objc.python_method
-    def _section_title(cls, value: str, x: float, y: float):
-        return cls._text(
-            value,
-            x,
-            y,
-            300,
-            18,
-            12,
-            bold=True,
+        self.local_rewrite_model_label = self._label(
+            "Llama 3.2 3B · on this Mac",
             color=AppKit.NSColor.secondaryLabelColor(),
         )
+        self.rewrite_model_row = self._row(
+            "Model",
+            self._slot(
+                [
+                    self.openai_rewrite_model_popup,
+                    self.openrouter_model_field,
+                    self.chatgpt_model_popup,
+                    self.local_rewrite_model_label,
+                ]
+            ),
+        )
+        self.rewrite_help = self._footer("")
+        rephrasing = self._section(
+            "Engine",
+            [self._row("Rephrase with", self.rewrite_engine_popup), self.rewrite_model_row],
+            self.rewrite_help,
+        )
 
-    @staticmethod
+        self.chatgpt_title = self._label("ChatGPT plan")
+        self.chatgpt_status = self._label(
+            "",
+            11.0,
+            color=AppKit.NSColor.secondaryLabelColor(),
+            wraps=True,
+            width=ROW_INNER_WIDTH - ACCOUNT_POPUP_WIDTH - ROW_SPACING,
+        )
+        self.chatgpt_accounts = self._popup(["No saved accounts"], ACCOUNT_POPUP_WIDTH)
+        self.chatgpt_accounts.setTarget_(self)
+        self.chatgpt_accounts.setAction_("chatGPTAccountChanged:")
+        self.chatgpt_connect_button = self._button(
+            "Continue with ChatGPT", "connectChatGPT:"
+        )
+        self.chatgpt_cancel_button = self._button("Cancel Sign-In", "cancelChatGPTSignIn:")
+        self.chatgpt_refresh_button = self._button("Refresh Models", "refreshChatGPT:")
+        self.chatgpt_add_button = self._button("Add Account", "addChatGPTAccount:")
+        self.chatgpt_usage_button = self._button("Manage Usage", "manageChatGPTUsage:")
+        self.chatgpt_disconnect_button = self._button("Disconnect", "disconnectChatGPT:")
+        self.chatgpt_section = self._section(
+            "ChatGPT Account",
+            [
+                self._row(
+                    self._stack(
+                        [self.chatgpt_title, self.chatgpt_status],
+                        vertical=True,
+                        spacing=2,
+                    ),
+                    self.chatgpt_accounts,
+                ),
+                self._row(
+                    "",
+                    self._stack(
+                        [
+                            self.chatgpt_connect_button,
+                            self.chatgpt_cancel_button,
+                            self.chatgpt_refresh_button,
+                            self.chatgpt_add_button,
+                            self.chatgpt_usage_button,
+                            self.chatgpt_disconnect_button,
+                        ],
+                        vertical=False,
+                        spacing=8,
+                    ),
+                ),
+            ],
+            self._footer(
+                "Uses your ChatGPT plan allowance for rephrasing only. "
+                "Transcription keeps its own API billing."
+            ),
+        )
+        return self._pane([rephrasing, self.chatgpt_section])
+
     @objc.python_method
-    def _color(rgb: int, alpha: float = 1.0):
-        return AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
-            ((rgb >> 16) & 0xFF) / 255,
-            ((rgb >> 8) & 0xFF) / 255,
-            (rgb & 0xFF) / 255,
-            alpha,
+    def _build_keys_pane(self):
+        self.api_key_field, openai = self._key_control("openai")
+        self.elevenlabs_key_field, elevenlabs = self._key_control("elevenlabs")
+        self.openrouter_key_field, openrouter = self._key_control("openrouter")
+        keys = self._section(
+            "Provider Keys",
+            [
+                self._row("OpenAI", openai, subtitle="Transcription and rephrasing"),
+                self._row("ElevenLabs", elevenlabs, subtitle="Transcription"),
+                self._row("OpenRouter", openrouter, subtitle="Rephrasing"),
+            ],
+            self._footer(
+                "Keys are stored in your macOS Keychain, never in settings files. "
+                "Paste a new key to replace a saved one."
+            ),
+        )
+        return self._pane([keys])
+
+    @objc.python_method
+    def _build_action_bar(self) -> None:
+        root = self.window.contentView()
+        bar = AppKit.NSView.alloc().initWithFrame_(AppKit.NSZeroRect)
+        bar.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        hint = self._label(
+            "Saving restarts Red Whisper in the background.",
+            11.0,
+            color=AppKit.NSColor.secondaryLabelColor(),
+        )
+        cancel = self._button("Cancel", "cancelSettings:")
+        cancel.setKeyEquivalent_("\x1b")
+        save = self._button("Save", "saveSettings:")
+        save.setKeyEquivalent_("\r")
+        for view in (hint, cancel, save):
+            bar.addSubview_(view)
+        root.addSubview_(bar)
+        AppKit.NSLayoutConstraint.activateConstraints_(
+            [
+                bar.leadingAnchor().constraintEqualToAnchor_(root.leadingAnchor()),
+                bar.trailingAnchor().constraintEqualToAnchor_(root.trailingAnchor()),
+                bar.bottomAnchor().constraintEqualToAnchor_(root.bottomAnchor()),
+                bar.heightAnchor().constraintEqualToConstant_(ACTION_BAR_HEIGHT),
+                save.trailingAnchor().constraintEqualToAnchor_constant_(
+                    bar.trailingAnchor(), -PANE_INSET
+                ),
+                save.centerYAnchor().constraintEqualToAnchor_(bar.centerYAnchor()),
+                save.widthAnchor().constraintGreaterThanOrEqualToConstant_(84),
+                cancel.trailingAnchor().constraintEqualToAnchor_constant_(
+                    save.leadingAnchor(), -10
+                ),
+                cancel.centerYAnchor().constraintEqualToAnchor_(bar.centerYAnchor()),
+                cancel.widthAnchor().constraintEqualToAnchor_(save.widthAnchor()),
+                hint.leadingAnchor().constraintEqualToAnchor_constant_(
+                    bar.leadingAnchor(), PANE_INSET
+                ),
+                hint.centerYAnchor().constraintEqualToAnchor_(bar.centerYAnchor()),
+                hint.trailingAnchor().constraintLessThanOrEqualToAnchor_constant_(
+                    cancel.leadingAnchor(), -ROW_SPACING
+                ),
+            ]
         )
 
     @objc.python_method
-    def _add_row(self, content, label: str, control, y: float) -> None:
-        content.addSubview_(
-            self._text(label, 44, y + 3, 170, 22, 13)
-        )
-        content.addSubview_(control)
+    def _select_pane(self, identifier: str, animate: bool = True) -> None:
+        pane = self._panes.get(identifier)
+        if pane is None:
+            return
+        if pane is not self._current_pane:
+            root = self.window.contentView()
+            if self._current_pane is not None:
+                self._current_pane.removeFromSuperview()
+            root.addSubview_(pane)
+            AppKit.NSLayoutConstraint.activateConstraints_(
+                [
+                    pane.topAnchor().constraintEqualToAnchor_(root.topAnchor()),
+                    pane.leadingAnchor().constraintEqualToAnchor_(root.leadingAnchor()),
+                ]
+            )
+            self._current_pane = pane
+        self._toolbar.setSelectedItemIdentifier_(identifier)
+        self._fit_window(animate)
 
-    @staticmethod
     @objc.python_method
-    def _text(
-        value: str,
-        x: float,
-        y: float,
-        width: float,
-        height: float,
-        size: float,
-        *,
-        bold: bool = False,
-        color=None,
+    def _fit_window(self, animate: bool = True) -> None:
+        """Resize the window to the selected pane, keeping its top edge fixed."""
+        pane = getattr(self, "_current_pane", None)
+        if pane is None:
+            return
+        pane.layoutSubtreeIfNeeded()
+        height = pane.fittingSize().height + ACTION_BAR_HEIGHT
+        delta = height - self.window.contentView().frame().size.height
+        if abs(delta) < 0.5:
+            return
+        frame = self.window.frame()
+        self.window.setFrame_display_animate_(
+            AppKit.NSMakeRect(
+                frame.origin.x,
+                frame.origin.y - delta,
+                frame.size.width,
+                frame.size.height + delta,
+            ),
+            True,
+            bool(animate and self.window.isVisible()),
+        )
+
+    def toolbarAllowedItemIdentifiers_(self, _toolbar):
+        return [identifier for identifier, _label, _symbol_name in SETTINGS_PANES]
+
+    def toolbarDefaultItemIdentifiers_(self, _toolbar):
+        return [identifier for identifier, _label, _symbol_name in SETTINGS_PANES]
+
+    def toolbarSelectableItemIdentifiers_(self, _toolbar):
+        return [identifier for identifier, _label, _symbol_name in SETTINGS_PANES]
+
+    def toolbar_itemForItemIdentifier_willBeInsertedIntoToolbar_(
+        self, _toolbar, identifier, _will_insert
     ):
-        label = AppKit.NSTextField.labelWithString_(value)
-        label.setFrame_(AppKit.NSMakeRect(x, y, width, height))
-        weight = 0.6 if bold else 0.0
+        label, symbol_name = next(
+            (label, symbol_name)
+            for pane_id, label, symbol_name in SETTINGS_PANES
+            if pane_id == identifier
+        )
+        item = AppKit.NSToolbarItem.alloc().initWithItemIdentifier_(identifier)
+        item.setLabel_(label)
+        item.setPaletteLabel_(label)
+        item.setImage_(_symbol(symbol_name, label))
+        item.setTarget_(self)
+        item.setAction_("selectPane:")
+        return item
+
+    def selectPane_(self, sender) -> None:
+        self._select_pane(sender.itemIdentifier())
+
+    def transcriptionModelChanged_(self, _sender) -> None:
+        engine, _model = _selected_value(
+            self.transcription_model_popup, TRANSCRIPTION_MODEL_VALUES
+        )
+        self.maximum_accuracy.setEnabled_(engine == "local")
+        if engine == "local":
+            help_text = "Runs entirely on this Mac. Audio never leaves your device."
+        else:
+            provider = "OpenAI" if engine == "openai" else "ElevenLabs"
+            help_text = f"Each recording is sent to {provider} and billed to your API key."
+            if not self._saved_keys.get(engine):
+                help_text += f" Add a {provider} key under API Keys."
+        self.transcription_help.setStringValue_(help_text)
+
+    def chooseReplacements_(self, _sender) -> None:
+        panel = AppKit.NSOpenPanel.openPanel()
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setAllowedFileTypes_(["json"])
+        panel.setMessage_("Choose a JSON file of term replacements.")
+
+        def finished(response):
+            if response == AppKit.NSModalResponseOK and panel.URL() is not None:
+                self.replacements_field.setStringValue_(panel.URL().path())
+
+        panel.beginSheetModalForWindow_completionHandler_(self.window, finished)
+
+    @objc.python_method
+    def _pane(self, sections):
+        pane = self._stack(sections, vertical=True, spacing=SECTION_SPACING)
+        pane.setEdgeInsets_(AppKit.NSEdgeInsets(22, PANE_INSET, 6, PANE_INSET))
+        pane.widthAnchor().constraintEqualToConstant_(WINDOW_WIDTH).setActive_(True)
+        return pane
+
+    @objc.python_method
+    def _section(self, title: str, rows, footer=None):
+        header = self._label(title, 13.0, weight=AppKit.NSFontWeightSemibold)
+        group = SettingsGroupView.alloc().initWithFrame_(AppKit.NSZeroRect)
+        group.setOrientation_(AppKit.NSUserInterfaceLayoutOrientationVertical)
+        group.setAlignment_(AppKit.NSLayoutAttributeLeading)
+        group.setSpacing_(0)
+        group.setEdgeInsets_(AppKit.NSEdgeInsets(3, 0, 3, 0))
+        group.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        for row in rows:
+            group.addArrangedSubview_(row)
+        group.widthAnchor().constraintEqualToConstant_(GROUP_WIDTH).setActive_(True)
+        views = [header, group] + ([footer] if footer is not None else [])
+        section = self._stack(views, vertical=True, spacing=7)
+        section.widthAnchor().constraintEqualToConstant_(GROUP_WIDTH).setActive_(True)
+        return section
+
+    @objc.python_method
+    def _row(self, title, control, *, subtitle: str | None = None):
+        """A label on the left and a control on the right, System Settings style."""
+        row = AppKit.NSView.alloc().initWithFrame_(AppKit.NSZeroRect)
+        row.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        control.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        if isinstance(title, str):
+            texts = [self._label(title)]
+            if subtitle:
+                texts.append(
+                    self._label(
+                        subtitle,
+                        11.0,
+                        color=AppKit.NSColor.secondaryLabelColor(),
+                        wraps=True,
+                        width=ROW_INNER_WIDTH - control.fittingSize().width - ROW_SPACING,
+                    )
+                )
+            text = self._stack(texts, vertical=True, spacing=2)
+            if title and isinstance(control, AppKit.NSControl):
+                control.setAccessibilityLabel_(title)
+        else:
+            text = title
+        row.addSubview_(text)
+        row.addSubview_(control)
+        preferred_height = row.heightAnchor().constraintEqualToConstant_(ROW_HEIGHT)
+        preferred_height.setPriority_(AppKit.NSLayoutPriorityDefaultLow)
+        AppKit.NSLayoutConstraint.activateConstraints_(
+            [
+                row.widthAnchor().constraintEqualToConstant_(GROUP_WIDTH),
+                row.heightAnchor().constraintGreaterThanOrEqualToConstant_(ROW_HEIGHT),
+                row.heightAnchor().constraintGreaterThanOrEqualToAnchor_constant_(
+                    text.heightAnchor(), 18
+                ),
+                row.heightAnchor().constraintGreaterThanOrEqualToAnchor_constant_(
+                    control.heightAnchor(), 14
+                ),
+                text.leadingAnchor().constraintEqualToAnchor_constant_(
+                    row.leadingAnchor(), ROW_PADDING
+                ),
+                text.centerYAnchor().constraintEqualToAnchor_(row.centerYAnchor()),
+                control.trailingAnchor().constraintEqualToAnchor_constant_(
+                    row.trailingAnchor(), -ROW_PADDING
+                ),
+                control.centerYAnchor().constraintEqualToAnchor_(row.centerYAnchor()),
+                control.leadingAnchor().constraintGreaterThanOrEqualToAnchor_constant_(
+                    text.trailingAnchor(), ROW_SPACING
+                ),
+                preferred_height,
+            ]
+        )
+        return row
+
+    @staticmethod
+    @objc.python_method
+    def _slot(controls):
+        """Overlay alternative controls in one trailing-aligned position."""
+        slot = AppKit.NSView.alloc().initWithFrame_(AppKit.NSZeroRect)
+        slot.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        constraints = [
+            slot.widthAnchor().constraintEqualToConstant_(CONTROL_WIDTH),
+            slot.heightAnchor().constraintEqualToConstant_(26),
+        ]
+        for control in controls:
+            control.setTranslatesAutoresizingMaskIntoConstraints_(False)
+            slot.addSubview_(control)
+            constraints += [
+                control.trailingAnchor().constraintEqualToAnchor_(slot.trailingAnchor()),
+                control.centerYAnchor().constraintEqualToAnchor_(slot.centerYAnchor()),
+            ]
+        AppKit.NSLayoutConstraint.activateConstraints_(constraints)
+        return slot
+
+    @staticmethod
+    @objc.python_method
+    def _stack(views, *, vertical: bool, spacing: float):
+        stack = AppKit.NSStackView.stackViewWithViews_(views)
+        stack.setOrientation_(
+            AppKit.NSUserInterfaceLayoutOrientationVertical
+            if vertical
+            else AppKit.NSUserInterfaceLayoutOrientationHorizontal
+        )
+        stack.setAlignment_(
+            AppKit.NSLayoutAttributeLeading if vertical else AppKit.NSLayoutAttributeCenterY
+        )
+        stack.setSpacing_(spacing)
+        stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        return stack
+
+    @staticmethod
+    @objc.python_method
+    def _label(
+        value: str,
+        size: float = 13.0,
+        *,
+        weight: float = 0.0,
+        color=None,
+        wraps: bool = False,
+        width: float = GROUP_WIDTH,
+    ):
+        label = (
+            AppKit.NSTextField.wrappingLabelWithString_(value)
+            if wraps
+            else AppKit.NSTextField.labelWithString_(value)
+        )
         label.setFont_(AppKit.NSFont.systemFontOfSize_weight_(size, weight))
+        label.setTranslatesAutoresizingMaskIntoConstraints_(False)
         if color is not None:
             label.setTextColor_(color)
+        if wraps:
+            label.setPreferredMaxLayoutWidth_(width)
+        else:
+            label.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
         return label
+
+    @classmethod
+    @objc.python_method
+    def _footer(cls, value: str):
+        return cls._label(
+            value, 11.0, color=AppKit.NSColor.secondaryLabelColor(), wraps=True
+        )
+
+    @objc.python_method
+    def _button(self, title: str, action: str):
+        button = AppKit.NSButton.buttonWithTitle_target_action_(title, self, action)
+        button.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        return button
 
     @staticmethod
     @objc.python_method
-    def _popup(x: float, y: float, width: float, labels: list[str]):
+    def _popup(labels: list[str], width: float = CONTROL_WIDTH):
         popup = AppKit.NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            AppKit.NSMakeRect(x, y, width, 28), False
+            AppKit.NSMakeRect(0, 0, width, 25), False
         )
         popup.addItemsWithTitles_(labels)
+        popup.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        popup.widthAnchor().constraintEqualToConstant_(width).setActive_(True)
         return popup
 
     @staticmethod
     @objc.python_method
-    def _field(x: float, y: float, width: float, value: str):
+    def _field(value: str, width: float):
         field = AppKit.NSTextField.alloc().initWithFrame_(
-            AppKit.NSMakeRect(x, y, width, 26)
+            AppKit.NSMakeRect(0, 0, width, 22)
         )
         field.setStringValue_(value)
+        field.setBezelStyle_(AppKit.NSTextFieldRoundedBezel)
+        field.setUsesSingleLineMode_(True)
+        field.setLineBreakMode_(AppKit.NSLineBreakByTruncatingMiddle)
+        field.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        field.widthAnchor().constraintEqualToConstant_(width).setActive_(True)
         return field
 
     @staticmethod
     @objc.python_method
-    def _combo_box(
-        x: float,
-        y: float,
-        width: float,
-        values: list[str],
-        value: str,
-    ):
+    def _combo_box(values: list[str], value: str):
         combo = AppKit.NSComboBox.alloc().initWithFrame_(
-            AppKit.NSMakeRect(x, y, width, 26)
+            AppKit.NSMakeRect(0, 0, CONTROL_WIDTH, 26)
         )
         combo.addItemsWithObjectValues_(values)
         combo.setStringValue_(value)
         combo.setCompletes_(True)
         combo.setNumberOfVisibleItems_(min(8, max(1, len(values))))
+        combo.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        combo.widthAnchor().constraintEqualToConstant_(CONTROL_WIDTH).setActive_(True)
         return combo
 
-    @staticmethod
     @objc.python_method
-    def _checkbox(title: str, x: float, y: float):
-        checkbox = AppKit.NSButton.checkboxWithTitle_target_action_(title, None, None)
-        checkbox.setFrame_(AppKit.NSMakeRect(x, y, 395, 24))
-        return checkbox
+    def _key_control(self, provider: str):
+        """Return a provider key field and the row control that shows its status."""
+        saved = self._saved_keys[provider]
+        field = AppKit.NSSecureTextField.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, KEY_FIELD_WIDTH, 22)
+        )
+        field.setPlaceholderString_("Saved in Keychain" if saved else "Paste API key")
+        field.setBezelStyle_(AppKit.NSTextFieldRoundedBezel)
+        field.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        status = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 16, 16))
+        status.setImage_(_symbol("checkmark.circle.fill" if saved else "circle.dashed"))
+        status.setContentTintColor_(
+            AppKit.NSColor.systemGreenColor()
+            if saved
+            else AppKit.NSColor.tertiaryLabelColor()
+        )
+        status.setToolTip_("Saved in your Keychain" if saved else "No key saved")
+        status.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        AppKit.NSLayoutConstraint.activateConstraints_(
+            [
+                field.widthAnchor().constraintEqualToConstant_(KEY_FIELD_WIDTH),
+                status.widthAnchor().constraintEqualToConstant_(16),
+                status.heightAnchor().constraintEqualToConstant_(16),
+            ]
+        )
+        return field, self._stack([field, status], vertical=False, spacing=8)
 
     @objc.python_method
-    def _shortcut_button(self, x: float, y: float, action: str):
-        button = AppKit.NSButton.buttonWithTitle_target_action_("", self, action)
-        button.setFrame_(AppKit.NSMakeRect(x, y, 420, 28))
-        button.setButtonType_(AppKit.NSButtonTypeMomentaryPushIn)
+    def _shortcut_button(self, action: str):
+        button = self._button("", action)
         button.setBezelStyle_(AppKit.NSBezelStyleRounded)
-        button.setAlignment_(AppKit.NSTextAlignmentLeft)
+        button.setFont_(
+            AppKit.NSFont.systemFontOfSize_weight_(13.0, AppKit.NSFontWeightMedium)
+        )
+        button.widthAnchor().constraintEqualToConstant_(SHORTCUT_BUTTON_WIDTH).setActive_(True)
         return button
 
     @staticmethod
     @objc.python_method
-    def _shortcut_title(value: str | None, *, secondary: bool = False) -> str:
+    def _shortcut_title(value: str | None) -> str:
         if value is None:
-            return "Not set — click, then press a key"
-        suffix = "  ·  Click to change"
-        return HotkeyConfig(value).label + suffix
+            return "Not set · click, then press keys"
+        if value == "fn":
+            return "Fn / Globe"
+        return HotkeyConfig(value).label
 
     @objc.python_method
     def _refresh_shortcut_buttons(self) -> None:
@@ -509,12 +900,10 @@ class NativeSettingsController(AppKit.NSObject):
             self._shortcut_title(self.primary_shortcut_value)
         )
         self.secondary_shortcut_button.setTitle_(
-            self._shortcut_title(self.secondary_shortcut_value, secondary=True)
+            self._shortcut_title(self.secondary_shortcut_value)
         )
         if hasattr(self, "shortcut_help"):
-            self.shortcut_help.setStringValue_(
-                "Click a shortcut field, then press the key or combination you want."
-            )
+            self.shortcut_help.setStringValue_(SHORTCUT_HELP)
 
     def capturePrimary_(self, _sender) -> None:
         self._begin_shortcut_capture("primary")
@@ -531,10 +920,11 @@ class NativeSettingsController(AppKit.NSObject):
             if which == "primary"
             else self.secondary_shortcut_button
         )
-        hint = "Press your shortcut now · Esc cancels"
+        hint = "Press keys… · Esc cancels"
         if which == "secondary":
-            hint = "Press shortcut · Delete clears · Esc cancels"
+            hint = "Press keys · Delete clears"
         button.setTitle_(hint)
+        button.setBezelColor_(AppKit.NSColor.controlAccentColor())
         self.shortcut_help.setStringValue_(
             "Listening for your keyboard…" if which == "primary" else
             "Listening… Press Delete to remove the secondary shortcut."
@@ -657,6 +1047,12 @@ class NativeSettingsController(AppKit.NSObject):
             self._shortcut_monitor = None
         self._capturing_shortcut = None
         self._pending_modifier = None
+        for button in (
+            getattr(self, "primary_shortcut_button", None),
+            getattr(self, "secondary_shortcut_button", None),
+        ):
+            if button is not None:
+                button.setBezelColor_(None)
 
     def show(self) -> None:
         self._close_notified = False
@@ -823,7 +1219,7 @@ class NativeSettingsController(AppKit.NSObject):
             self.device_popup.addItemWithTitle_("No microphone found")
             self.device_popup.setEnabled_(False)
             self.device_help.setStringValue_(
-                "Connect a Bluetooth headset with a microphone to use it here."
+                "Connect a microphone or Bluetooth headset to use it here."
             )
             return
 
@@ -850,7 +1246,7 @@ class NativeSettingsController(AppKit.NSObject):
                 device.name for device in devices if device.id == target_id
             )
         self.device_help.setStringValue_(
-            f"{len(devices)} microphone input{'s' if len(devices) != 1 else ''} detected · Bluetooth updates automatically."
+            f"{len(devices)} microphone{'s' if len(devices) != 1 else ''} available. Bluetooth headsets appear automatically."
         )
 
     def cancelSettings_(self, _sender) -> None:
@@ -871,8 +1267,6 @@ class NativeSettingsController(AppKit.NSObject):
         self._stop_editing_shortcut_monitor()
         self.on_close()
         self._chatgpt_cancel.set()
-        if self.chatgpt_account_window:
-            self.chatgpt_account_window.orderOut_(None)
 
     def saveSettings_(self, _sender) -> None:
         if self._chatgpt_busy:
@@ -989,43 +1383,20 @@ class NativeSettingsController(AppKit.NSObject):
             self.rewrite_engine_popup, REWRITE_ENGINE_VALUES
         )
         self.openai_rewrite_model_popup.setEnabled_(selected == "openai")
-        self.openai_rewrite_model_popup.setHidden_(selected in {"openrouter", "chatgpt"})
+        self.openai_rewrite_model_popup.setHidden_(selected != "openai")
         self.openrouter_model_field.setHidden_(selected != "openrouter")
         self.chatgpt_model_popup.setHidden_(selected != "chatgpt")
+        self.local_rewrite_model_label.setHidden_(selected != "local")
+        self.rewrite_model_row.setHidden_(selected == "off")
+        self.chatgpt_section.setHidden_(selected != "chatgpt")
+        self.rewrite_help.setStringValue_(
+            REWRITE_HELP[selected]
+            + ("" if selected == "off" else "\n" + PROFESSIONAL_TIP)
+        )
+        self._fit_window()
 
     def showChatGPTAccount_(self, _sender) -> None:
-        if self.chatgpt_account_window is None:
-            rect = AppKit.NSMakeRect(0, 0, 620, 290)
-            self.chatgpt_account_window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-                rect, AppKit.NSWindowStyleMaskTitled | AppKit.NSWindowStyleMaskClosable,
-                AppKit.NSBackingStoreBuffered, False)
-            self.chatgpt_account_window.setTitle_("ChatGPT subscription — rephrasing only")
-            self.chatgpt_account_window.setReleasedWhenClosed_(False)
-            self.chatgpt_account_window.center()
-            content = AppKit.NSVisualEffectView.alloc().initWithFrame_(rect)
-            content.setMaterial_(AppKit.NSVisualEffectMaterialUnderWindowBackground)
-            content.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
-            content.setState_(AppKit.NSVisualEffectStateActive)
-            self.chatgpt_account_window.setContentView_(content)
-            self.chatgpt_status = self._text("Not connected", 24, 193, 572, 70, 13)
-            content.addSubview_(self.chatgpt_status)
-            self.chatgpt_accounts = self._popup(24, 154, 572, ["No saved accounts"])
-            self.chatgpt_accounts.setTarget_(self)
-            self.chatgpt_accounts.setAction_("chatGPTAccountChanged:")
-            content.addSubview_(self.chatgpt_accounts)
-            for title, action, x, y, width in (
-                ("Continue with ChatGPT", "connectChatGPT:", 24, 110, 210),
-                ("Add account", "addChatGPTAccount:", 240, 110, 120),
-                ("Refresh models", "refreshChatGPT:", 368, 110, 130),
-                ("Disconnect", "disconnectChatGPT:", 24, 65, 110),
-                ("Manage usage", "manageChatGPTUsage:", 142, 65, 140),
-                ("Cancel sign-in", "cancelChatGPTSignIn:", 290, 65, 130),
-            ):
-                button = AppKit.NSButton.buttonWithTitle_target_action_(title, self, action)
-                button.setFrame_(AppKit.NSMakeRect(x, y, width, 32))
-                content.addSubview_(button)
-            content.addSubview_(self._text("Uses your plan allowance. Transcription keeps its existing API billing.", 24, 21, 572, 25, 12))
-        self.chatgpt_account_window.makeKeyAndOrderFront_(None)
+        self._select_pane("rephrasing")
         self._update_chatgpt_controls()
         self._run_chatgpt("refresh")
 
@@ -1034,6 +1405,7 @@ class NativeSettingsController(AppKit.NSObject):
         if self._chatgpt_busy:
             return
         self._chatgpt_busy = True
+        self._chatgpt_operation = operation
         self._chatgpt_cancel = threading.Event()
         self._update_chatgpt_controls("Connecting in your browser…" if operation in {"connect", "add"} else "Synchronizing ChatGPT…")
 
@@ -1093,16 +1465,35 @@ class NativeSettingsController(AppKit.NSObject):
 
     @objc.python_method
     def _update_chatgpt_controls(self, message=""):
-        if self.chatgpt_account_window is None:
+        if getattr(self, "chatgpt_status", None) is None:
             return
         state = self._chatgpt_state
-        status = (f"Using ChatGPT plan · {state.get('email', '')} · {len(state.get('models', []))} models" if state.get("connected") else "Not connected to a ChatGPT plan")
+        connected = bool(state.get("connected"))
+        model_count = len(state.get("models", []))
+        if connected:
+            status = f"Connected · {model_count} model{'s' if model_count != 1 else ''} available"
+        else:
+            status = "Not connected. Sign in to rephrase with your plan."
         self.chatgpt_status.setStringValue_(status + ("\n" + message if message else ""))
         self.chatgpt_account_ids = [account["id"] for account in state.get("accounts", [])]
         self.chatgpt_accounts.removeAllItems()
         self.chatgpt_accounts.addItemsWithTitles_([account["label"] for account in state.get("accounts", [])] or ["No saved accounts"])
         _select_value(self.chatgpt_accounts, self.chatgpt_account_ids, state.get("active"))
         self.chatgpt_accounts.setEnabled_(not self._chatgpt_busy and bool(self.chatgpt_account_ids))
+        self.chatgpt_accounts.setHidden_(not self.chatgpt_account_ids)
+        signing_in = self._chatgpt_busy and self._chatgpt_operation in {"connect", "add"}
+        self.chatgpt_connect_button.setHidden_(connected or signing_in)
+        self.chatgpt_connect_button.setEnabled_(not self._chatgpt_busy)
+        self.chatgpt_cancel_button.setHidden_(not signing_in)
+        for button in (
+            self.chatgpt_refresh_button,
+            self.chatgpt_add_button,
+            self.chatgpt_usage_button,
+            self.chatgpt_disconnect_button,
+        ):
+            button.setHidden_(not connected or signing_in)
+            button.setEnabled_(not self._chatgpt_busy)
+        self._fit_window()
 
     def connectChatGPT_(self, _sender):
         self._run_chatgpt("connect")
