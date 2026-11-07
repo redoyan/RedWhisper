@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Red Whisper</string>
+    <string name="accessibility_label">Red Whisper bubble</string>
+    <string name="accessibility_description">Shows the Red Whisper bubble whenever the keyboard is open, and inserts your finished dictation into the box you are typing in. Red Whisper only checks which text box is active. It does not read, store, or send anything else on your screen.</string>
+</resources>
